@@ -1,0 +1,138 @@
+# scenarios/company-1/RPV1B-SLIM-FANOUT/vars.yml -- shared config for RPV-1B-SLIM-FANOUT.
+# Fan-out variant of RPV-1B-SLIM: 1 hub + N sinks (default 20), each a 3-node cluster,
+# all v_new, no upgrade.  Same filtered bidirectional pull-replication as RPV-1B-SLIM,
+# fanned out across every sink.  W-1C cluster-wide-tx workloads OFF by default (see
+# rpv1b_slim_enable_w1c); PullReplicationCompositeChangeVectors enabled upfront before seed.
+
+# ---------- Topology -- 1 hub + N sinks, (1 + sink_count) * 3 nodes total ----
+db_name: db1
+
+# Hub at cluster id `hub_id`; the sinks occupy the `sink_count` cluster ids immediately
+# after it.  With hub_id=1, sink_count=20 -> hub=1, sinks=2..21, clusters 1..21 (63 nodes).
+# Override sink count with -e sink_count=N (memory permitting -- each cluster is 3 nodes
+# at 2.5G; pass -e container_memory=800m or lower for large fan-outs).  run.sh derives
+# clusters_count = 1 + sink_count and passes it to provision/form.
+hub_id: 1
+sink_count: 20
+
+# Derived: the list of sink cluster ids [hub_id+1 .. hub_id+sink_count].
+sink_ids: "{{ range(hub_id | int + 1, hub_id | int + 1 + (sink_count | int)) | list }}"
+
+# Derived: flat list of EVERY node in the topology (hub + all sinks), a/b/c per cluster.
+# Used by whole-topology dumps like schema_version.  E.g. hub_id=1, sink_count=2 ->
+# ['1a','1b','1c','2a','2b','2c','3a','3b','3c'].
+nodes_all: "{{ ([hub_id | int] + sink_ids) | map('string') | product(['a', 'b', 'c']) | map('join') | list }}"
+
+# Derived hub helpers (vars.yml is loaded at play scope via vars_files; per-sink
+# helpers are built inside the playbook's loops from each sink id).
+hub_cluster_leader: "{{ hub_id | default(1) }}a"
+hub_cluster_nodes:
+  - "{{ hub_id | default(1) }}a"
+  - "{{ hub_id | default(1) }}b"
+  - "{{ hub_id | default(1) }}c"
+
+# ---------- Seed -- 5 prefix buckets on Hub, 11k docs total -----------------
+# Override per bucket with -e bucket_X=N for a fast dev shakedown.
+bucket_users_sink:  2000
+bucket_users_hub:   2000
+bucket_orders_sink: 2000
+bucket_orders_hub:  2000
+bucket_internal:    3000
+
+# ---------- Sink-local seed (symmetric writes on the sink) ------------------
+# Per Karmel: every replication scenario needs writes on the sink whenever there
+# are writes on the hub.  We seed `sink-local/users/*` on the sink leader at step 3
+# and run a parallel single-bucket workload on the sink through the run (step 5).
+# The `sink-local/` prefix is intentionally outside the hub->sink filter so the
+# docs are sink-local-only.  Whitelisted in every filter_compliance call via the
+# third entry in `allowed_prefixes`.
+sink_local_seed_count: 2000
+
+# ---------- Filter spec -- hub-only collections stay on hub -----------------
+sink_allowed_prefixes: ["users/sink/*", "orders/sink/*"]
+
+# ---------- Default-segment fallback for the per-collection revisions config -----------
+default_keep: 25
+default_max_age_secs: 21600
+
+# ---------- Workload -- W-1 + W-2 + W-1C on Hub, W-1 + W-1C on Sink ---------
+# Workloads run continuously from launch through endpoint, stopped explicitly by
+# step 12.  5-bucket split keeping the original 40/40/20 collection weights:
+#   users    = sink(20) + hub(20) = 40
+#   orders   = sink(20) + hub(20) = 40
+#   Internal = 20
+workload_buckets_spec: "users/sink:{{ bucket_users_sink | default(2000) | int }}:20|orders/sink:{{ bucket_orders_sink | default(2000) | int }}:20|users/hub:{{ bucket_users_hub | default(2000) | int }}:20|orders/hub:{{ bucket_orders_hub | default(2000) | int }}:20|Internal:{{ bucket_internal | default(3000) | int }}:20"
+
+# ---------- Probe sets for parity asserts -----------------------------------
+parity_probe_count: 50
+
+# ---------- Budgets (in seconds) --------------------------------------------
+member_budget_secs: 300
+drain_budget_secs: 180
+quiesce_budget_secs: 1200
+filter_drain_budget_secs: 600
+
+# Budget for post-workload-stop tombstone-count convergence (Section 12).  Same
+# rationale as RPV-1: cleanup runs on its own timer and counts only equalize once
+# cleanup has caught up.
+tombstone_settle_timeout_secs: 300
+
+# ---------- Pre-seed feature flags ------------------------------------------
+# Flags to enable on hub + sink at step 3b, BEFORE seed/workloads.  Since this
+# scenario runs all-v_new from T0 there's no mixed-binary window to gate behind
+# a runtime flip -- we just turn them on once at the start so workloads exercise
+# the v_new composite-CV path from the first PUT.
+post_upgrade_feature_flags:
+  - PullReplicationCompositeChangeVectors
+
+pre_cv_toggle_phase:  pre_cv_toggle
+post_cv_toggle_phase: post_cv_toggle
+
+t0_stats_assert_fields:
+  - CountOfAttachments
+  - CountOfConflicts
+  - CountOfDocuments
+  - CountOfDocumentsConflicts
+  - CountOfRemoteAttachments
+  - CountOfRevisionDocuments
+  - CountOfTimeSeriesDeletedRanges
+  - CountOfUniqueAttachments
+
+# Tombstone-wait relax flag.  Default TRUE -- the CountOfTombstones
+# stats_field_parity wait in step 12 is informational by default.  Override
+# -e relax_rpv1_tombstone_wait=false to restore strict behaviour.
+relax_rpv1_tombstone_wait: true
+
+# Per-marker propagation wait budget used by step 3 + endpoint marker waits.
+marker_propagation_timeout_secs: 300
+
+# W-1C cluster-wide-tx sidecar workloads.  Default OFF -- CWT writes carry a
+# RAFT entry in the change vector forever, which interacts badly with pull
+# replication ("once-CWT-always-quarantined" pattern we surfaced earlier).
+# Flip to true with -e rpv1b_slim_enable_w1c=true to exercise the CWT path
+# explicitly.
+rpv1b_slim_enable_w1c: false
+
+# Run intra-cluster ConsistencyCheck just before step 12's final asserts.
+# Default OFF (scenario is built for cross-cluster signal, and the tool is
+# intra-cluster only -- usually adds no signal).  Flip to true to investigate
+# whether the tool catches intra-cluster drift the harness asserts miss
+# (e.g. "rpv1b-slim on v6.2 + ConsistencyCheck" exploration).  Adds ~3-5min
+# of wall-clock per iter.  Override -e rpv1b_slim_run_consistency_check=true.
+rpv1b_slim_run_consistency_check: false
+
+# Cooldown (seconds) between workload-stop and the ConsistencyCheck call.
+# Only consumed when rpv1b_slim_run_consistency_check is true.  Gives the
+# cluster time to drain any in-flight replication + tombstone cleanup so
+# the tool scans a stable etag frontier instead of catching transient
+# drift mid-settle.  Override -e cc_cooldown_secs=N for shorter/longer
+# settle windows.
+cc_cooldown_secs: 60
+
+# Soak duration (seconds) -- explicit dwell between step 5 (workload launch)
+# and step 11 (endpoint checkpoint).  Without it the scenario runs end-to-end
+# in seconds and the workloads barely write anything (RPV-1 gets its dwell
+# from the upgrade phases; RPV-1B-SLIM has none, so we need an explicit pause).
+# Default 1800s = 30 min, per Karmel's request for the CWT-stress overnight.
+# Override -e soak_duration_secs=N for shorter dev/CI runs.
+soak_duration_secs: 1800

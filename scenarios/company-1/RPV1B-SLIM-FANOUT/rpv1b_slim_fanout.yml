@@ -1,0 +1,1168 @@
+##################################################################################################
+# scenarios/company-1/RPV1B-SLIM/rpv1b_slim.yml -- filter-aware steady-state across 1 hub + 1 sink
+# (6 nodes, all clusters replication-factor 3), all nodes on v_new from T0.  No rolling upgrade
+# -- this variant exercises the v_new composite-CV path under live churn with no mixed-binary
+# window.
+#
+# What this scenario does:
+#   1.  Create the database on the hub and on the sink with a revisions policy for the
+#       Users, Orders, and Internal collections.
+#   2.  Wire bidirectional pull-replication from the hub to the sink:
+#         hub -> sink:  filtered (users/sink/, orders/sink/)
+#         sink -> hub:  '*' (unfiltered -- every sink write, incl sink-local/, flows to hub)
+#       Hub-only buckets stay on the hub.  Filter compliance enforced by the hub->sink filter.
+#   3.  Seed the hub with five prefix buckets (~11k documents) and wait for the filter to
+#       drain -- a marker document under the allowed prefix has to reach the sink before
+#       continuing.
+#   3b. Enable post_upgrade_feature_flags on both cluster leaders ONCE upfront (no mixed-binary
+#       window to gate behind a per-step enable).  Workloads launched in step 5 exercise the
+#       v_new composite-CV path from their first PUT.
+#   4.  Take a T0 baseline checkpoint while everything is quiet.
+#   5.  Start the background hub-side workloads (W-1, W-2, W-1C) writing across all five
+#       buckets, plus W-1 + W-1C on the sink under sink-local/.  W-1C cluster-wide-tx
+#       sidecars are OFF by default in this variant (rpv1b_slim_enable_w1c, default false).
+#   11. Endpoint checkpoint while writers are still going: schema parity across all 6 nodes,
+#       filter compliance holds, CV-boundary check on hub -> sink.
+#   12. Stop all workloads, wait for every cluster to drain, then run the strict final
+#       asserts on a quiet topology: doc-id-set parity per bucket, revision-count parity
+#       per bucket, no orphan revisions, filter compliance, /stats parity, AND hub-sink
+#       doc-set completeness (every doc the filter says should be on the sink is on the
+#       sink; no sink-side orphans except sink-local).
+#
+# Deep version (invariants, risks, validators) -> company-1_TESTING_PLAN/scenarios.md (RPV-1B).
+#
+# PREREQ -- bring up a clean 2-cluster x 3-node lab at v_new.
+#
+#   1. ansible-playbook playbooks/teardown_containers.yml -K
+#   2. ansible-playbook playbooks/provision_nodes.yml -K -e clusters_count=2 -e nodes_per_cluster=3
+#   3. ansible-playbook playbooks/install_ravendb.yml -K -e custom_build=$PWD/builds/raven-prNNN.deb
+#   4. ansible-playbook playbooks/form_clusters.yml -K -e clusters_count=2 -e nodes_per_cluster=3
+#
+# RUN
+#
+#   ansible-playbook scenarios/company-1/RPV1B-SLIM/rpv1b_slim.yml -K
+#
+#   (or wrapped by RPV1B-SLIM/run.sh which handles teardown + install + form)
+##################################################################################################
+
+
+# ----- pre: kill any leftover background workloads from a previous run, then validate inputs --
+
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
+  vars:
+    pidfile: "/tmp/w1-{{ hub_id | default(1) }}a-db1.pid"
+
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
+  vars:
+    pidfile: "/tmp/w2-{{ hub_id | default(1) }}a-db1.pid"
+
+# W-1C orphan-kill (sidecar pidfiles -- mirrors W-1 across hub + sink).
+# Gated on rpv1b_slim_enable_w1c (default false) -- when W-1C is disabled the
+# pidfiles never exist so the stop is a no-op anyway, but skip the imports
+# entirely to keep the orphan-kill output focused on the workloads that ran.
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
+  vars:
+    pidfile: "/tmp/w1c-{{ hub_id | default(1) }}a-db1.pid"
+  when: rpv1b_slim_enable_w1c | default(false) | bool
+
+# Sink-side leftover cleanup for EVERY sink (import_playbook can't be looped, and sink_ids
+# isn't visible at import scope) -- inline the same TERM/KILL/rm stop_workload does, looped
+# over every sink's w1 + w1c pidfile.  Idempotent: a no-op when a pidfile is already gone.
+- name: RPV-1B-SLIM-FANOUT pre -- stop leftover sink-side workloads (w1 + w1c on every sink)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: "Stop leftover {{ item.1 }} on sink {{ item.0 }}a (if any)"
+      ansible.builtin.shell: |
+        pf="/tmp/{{ item.1 }}-{{ item.0 }}a-db1.pid"
+        if [ -f "$pf" ]; then
+          pid=$(cat "$pf"); kill -TERM $pid 2>/dev/null || true; sleep 2; kill -KILL $pid 2>/dev/null || true; rm -f "$pf"
+          echo "WORKLOAD STOPPED  pid=$pid  pidfile=$pf"
+        else
+          echo "WORKLOAD ALREADY EXITED  no pidfile at $pf"
+        fi
+      changed_when: true
+      loop: "{{ sink_ids | product(['w1', 'w1c']) | list }}"
+
+- name: RPV-1B-SLIM pre -- show plan
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    # No v_new_build assertion -- RPV-1B-SLIM has no upgrade phase, so the
+    # v_new .deb is consumed by run.sh's install_ravendb step (NOT by this
+    # playbook).  Topology vars come from vars.yml / -e overrides.
+    - name: Show plan
+      ansible.builtin.debug:
+        msg: >-
+          RPV-1B-SLIM-FANOUT  hub={{ hub_id | default(1) }}a/b/c  sinks={{ sink_ids | length }} ({{ sink_ids | first }}..{{ sink_ids | last }})
+          db={{ db_name }}  w1c_enabled={{ rpv1b_slim_enable_w1c | default(false) | bool }}
+          flags={{ post_upgrade_feature_flags | default([]) }}
+
+
+# ----- step 1: create the database on hub + every sink and set the revisions policy ----------
+
+# Hub db-create via the toolbox playbook -- this ALSO imports ensure_ravendb_venv.yml, which
+# sets ansible_python_interpreter to the ravendb venv for the rest of the run (the looped
+# ravendb.ravendb.database call for the sinks below needs it).  The fact persists across plays.
+- ansible.builtin.import_playbook: ../../../toolbox/db/create_database.yml
+  vars: { cluster_leader: "{{ hub_id | default(1) }}a",  db_name: db1, replication_factor: 3 }
+
+- name: RPV-1B-SLIM-FANOUT step 1 -- create db1 on every sink (rf=3)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    # import_playbook can't be looped, so call the same module create_database.yml wraps
+    # (ravendb.ravendb.database) directly, once per sink cluster.
+    - name: "Create db1 on sink cluster {{ item }} (rf=3)"
+      ravendb.ravendb.database:
+        url: "https://{{ item }}a.{{ ravendb_domain }}:443"
+        database_name: db1
+        certificate_path: "{{ cert_dir }}/client.pem"
+        ca_cert_path: "{{ cert_ca_crt }}"
+        replication_factor: 3
+        state: present
+      loop: "{{ sink_ids }}"
+
+- name: RPV-1B-SLIM-FANOUT step 1 -- per-collection revisions config (Users / Orders / Internal)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: "Configure per-collection revisions on {{ item }}a/db1 (Users/Orders/Internal)"
+      ravendb_revisions:
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ item }}a"
+        db_name: db1
+        collections_config:
+          Users:    { keep: 10, max_age_secs: 1800 }
+          Orders:   { keep: 50, max_age_secs: 7200 }
+          Internal: { keep: 25, max_age_secs: 21600 }
+      loop: "{{ [hub_id | int] + sink_ids }}"
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.results | map(attribute='msg') | list }}" }
+
+
+# ----- step 2: wire the filtered pull-replication from the hub down to the sink --------------
+
+- name: RPV-1B-SLIM-FANOUT step 2 -- wire filtered pull (Hub -> every Sink)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    # Build the per-sink filter maps once, keyed by every sink cluster id (as a string).
+    # define_hub / attach_sinks already iterate the full sink list internally, so we pass
+    # the whole list + maps in ONE call each -- no per-sink loop needed here.
+    #   hub -> sink:  filtered to sink_allowed_prefixes (users/sink/*, orders/sink/*)
+    #   sink -> hub:  '*' (unfiltered) so sink-local writes flow back to the hub
+    # Every sink shares the SAME filter (broadcast fan-out).
+    - name: Build per-sink allowed-paths maps
+      ansible.builtin.set_fact:
+        sink_allowed_paths_map: "{{ sink_allowed_paths_map | default({}) | combine({ (item | string): sink_allowed_prefixes }) }}"
+        sink_to_hub_paths_map:  "{{ sink_to_hub_paths_map  | default({}) | combine({ (item | string): ['*'] }) }}"
+      loop: "{{ sink_ids }}"
+
+    - name: "Define hub pull task 'rpv1-hub' + access entries for every sink"
+      ravendb_tasks:
+        kind: define_hub
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        hub_leader: "{{ hub_id | default(1) }}a"
+        db_name: db1
+        hub_task_name: rpv1-hub
+        sink_cluster_ids: "{{ sink_ids }}"
+        sink_allowed_paths: "{{ sink_allowed_paths_map }}"
+        sink_to_hub_paths: "{{ sink_to_hub_paths_map }}"
+        replication_certs_dir: "{{ playbook_dir }}/../../../replication-certs"
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "Attach every sink's pull task to the hub topology"
+      ravendb_tasks:
+        kind: attach_sinks
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        hub_task_name: rpv1-hub
+        hub_topology_urls:
+          - "https://{{ hub_id | default(1) }}a.hubsink.test:443"
+          - "https://{{ hub_id | default(1) }}b.hubsink.test:443"
+          - "https://{{ hub_id | default(1) }}c.hubsink.test:443"
+        sink_cluster_ids: "{{ sink_ids }}"
+        sink_allowed_paths: "{{ sink_allowed_paths_map }}"
+        sink_to_hub_paths: "{{ sink_to_hub_paths_map }}"
+        replication_certs_dir: "{{ playbook_dir }}/../../../replication-certs"
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+
+# Dump pull-replication config on hub + first sink so the filter, mode, and allowed paths
+# are visible in the scenario log.  Sink configs are identical across the fan-out; dump the
+# first sink only (import_playbook can't be looped, and 20x identical dumps are just noise).
+# NOTE: sink_ids lives in vars.yml -> NOT visible at import_playbook scope, so derive the
+# first sink id from hub_id (passed via -e, available here): first sink = hub_id + 1.
+- ansible.builtin.import_playbook: ../../../toolbox/replication/dump_config.yml
+  vars:
+    target: "{{ hub_id  | default(1) }}a"
+    db_name: db1
+    hub_task_name: rpv1-hub
+- ansible.builtin.import_playbook: ../../../toolbox/replication/dump_config.yml
+  vars:
+    target: "{{ (hub_id | default(1) | int) + 1 }}a"
+    db_name: db1
+
+
+# ----- step 3: seed the hub with five prefix buckets and wait for the filter to drain --------
+
+- name: RPV-1B-SLIM step 3 -- seed Hub with 5 prefix buckets, then wait for filtered drain
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    # Users collection -- 2 buckets
+    - name: "Seed users/sink/* on hub {{ hub_id | default(1) }}a/db1 (count={{ bucket_users_sink }}, 1 rev)"
+      ravendb_writes:
+        kind: docs_revisions
+        phase: "{{ pre_cv_toggle_phase }}"
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ hub_id | default(1) }}a"
+        db_name: db1
+        id_prefix: users/sink
+        collection: Users
+        count: "{{ bucket_users_sink | default(2000) | int }}"
+        revs_per_doc: 1
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "Seed users/hub/* on hub {{ hub_id | default(1) }}a/db1 (count={{ bucket_users_hub }}, 1 rev)"
+      ravendb_writes:
+        kind: docs_revisions
+        phase: "{{ pre_cv_toggle_phase }}"
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ hub_id | default(1) }}a"
+        db_name: db1
+        id_prefix: users/hub
+        collection: Users
+        count: "{{ bucket_users_hub | default(2000) | int }}"
+        revs_per_doc: 1
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    # Orders collection -- 2 buckets
+    - name: "Seed orders/sink/* on hub {{ hub_id | default(1) }}a/db1 (count={{ bucket_orders_sink }}, 1 rev)"
+      ravendb_writes:
+        kind: docs_revisions
+        phase: "{{ pre_cv_toggle_phase }}"
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ hub_id | default(1) }}a"
+        db_name: db1
+        id_prefix: orders/sink
+        collection: Orders
+        count: "{{ bucket_orders_sink | default(2000) | int }}"
+        revs_per_doc: 1
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "Seed orders/hub/* on hub {{ hub_id | default(1) }}a/db1 (count={{ bucket_orders_hub }}, 1 rev)"
+      ravendb_writes:
+        kind: docs_revisions
+        phase: "{{ pre_cv_toggle_phase }}"
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ hub_id | default(1) }}a"
+        db_name: db1
+        id_prefix: orders/hub
+        collection: Orders
+        count: "{{ bucket_orders_hub | default(2000) | int }}"
+        revs_per_doc: 1
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    # Internal collection
+    - name: "Seed Internal/* on hub {{ hub_id | default(1) }}a/db1 (count={{ bucket_internal }}, 1 rev)"
+      ravendb_writes:
+        kind: docs_revisions
+        phase: "{{ pre_cv_toggle_phase }}"
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ hub_id | default(1) }}a"
+        db_name: db1
+        id_prefix: Internal
+        collection: Internal
+        count: "{{ bucket_internal | default(3000) | int }}"
+        revs_per_doc: 1
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    # Sink-side activity: write a sink-local pool that does NOT match the hub->sink filter.
+    # Top-level prefix `sink-local/` so it's easy to tell apart from hub-routed docs in
+    # logs and assertions.  Per Karmel: every replication scenario should have writes on
+    # the sink whenever there are writes on the hub.
+    - name: "Seed sink local (sink-local/users/*, count={{ sink_local_seed_count }}) on {{ item }}a/db1"
+      ravendb_writes:
+        kind: docs
+        phase: "{{ pre_cv_toggle_phase }}"
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ item }}a"
+        db_name: db1
+        id_prefix: "sink-local/users"
+        count: "{{ sink_local_seed_count | default(2000) | int }}"
+        body_tag: sink-local
+      loop: "{{ sink_ids }}"
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.results | map(attribute='msg') | list }}" }
+
+    # Confirm the filtered pull is actually flowing: a marker document under the sink's
+    # allowed prefix should make it from the hub to the sink's cluster.
+    - name: "Wait for users/sink/marker-* propagation hub -> sink {{ item }} a/b/c"
+      ravendb_wait:
+        kind: marker_propagation
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        source: "{{ hub_id | default(1) }}a"
+        targets: ["{{ item }}a", "{{ item }}b", "{{ item }}c"]
+        marker_id_prefix: "users/sink/marker-"
+        timeout: "{{ filter_drain_budget_secs | default(600) | int }}"
+      loop: "{{ sink_ids }}"
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.results | map(attribute='msg') | list }}" }
+
+
+# ----- step 3b: enable post-seed feature flags on hub + sink (all-v_new, no upgrade) ---
+# All 6 nodes are on v_new from T0.  No mixed-binary window to gate behind a per-step
+# enable -- flip post_upgrade_feature_flags on both cluster leaders once upfront so the
+# workloads launched in step 5 exercise the v_new composite-CV path from their first PUT.
+- name: RPV-1B-SLIM step 3b -- enable / disable post-seed feature flags on hub + sink
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    # Supports both directions in one call:
+    #   - `post_upgrade_feature_flags`         -> features to ENABLE  (add)
+    #   - `post_upgrade_feature_flags_remove`  -> features to DISABLE (remove)
+    # Used for the "legacy mode on v_new" path: v_new defaults the
+    # PullReplicationCompositeChangeVectors feature ON, so to get legacy
+    # behaviour we have to actively REMOVE it (not just skip enabling).
+    # Skipped when both lists are empty.
+    - name: "Toggle post-upgrade features on {{ item }}a/db1 (add+remove)"
+      ravendb_features:
+        kind: enable
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ item }}a"
+        db_name: db1
+        add:    "{{ post_upgrade_feature_flags        | default([]) }}"
+        remove: "{{ post_upgrade_feature_flags_remove | default([]) }}"
+      register: r_enable
+      when: ((post_upgrade_feature_flags        | default([])) | length > 0) or
+            ((post_upgrade_feature_flags_remove | default([])) | length > 0)
+      loop: "{{ [hub_id | int] + sink_ids }}"
+    - name: Show toggle result (step 3b)
+      ansible.builtin.debug:
+        msg: "{{ r_enable.results | map(attribute='msg') | list }}"
+      when: ((post_upgrade_feature_flags        | default([])) | length > 0) or
+            ((post_upgrade_feature_flags_remove | default([])) | length > 0)
+
+
+# ----- step 4: T0 baseline checkpoint while the topology is still quiet (all v_new) ----------
+
+- name: RPV-1B-SLIM step 4 -- T0 baseline checkpoint
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    # The filter has to hold from the start -- this catches any leak introduced during seeding.
+    - name: "T0: assert filter compliance on sink {{ item }} (allowed users/sink/, orders/sink/)"
+      ravendb_diagnostic:
+        kind: filter_compliance
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        sink_cluster_leader: "{{ item }}a"
+        db_name: db1
+        allowed_prefixes: ["users/sink/", "orders/sink/", "sink-local/"]
+        assert_mode: true
+      loop: "{{ sink_ids }}"
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.results | map(attribute='msg') | list }}" }
+
+    # Every node should be on the new binary at this point (no upgrade in this variant).
+    - name: "T0: dump schema version on all nodes (expect all v_new)"
+      ravendb_diagnostic:
+        kind: schema_version
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        nodes: "{{ nodes_all }}"
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    # Sink-routed bucket has to be present on every sink.
+    - name: "T0: assert users/sink doc-id-set parity across sink {{ item }} a/b/c"
+      ravendb_diagnostic:
+        kind: doc_id_set_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ item }}a", "{{ item }}b", "{{ item }}c"]
+        id_prefix: users/sink
+        count: "{{ parity_probe_count | default(50) | int }}"
+        assert_mode: true
+      loop: "{{ sink_ids }}"
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.results | map(attribute='msg') | list }}" }
+
+    # /stats parity at T0 is informational only -- drift not expected (no mixed binaries),
+    # but the strict assert lives in step 12 (post-workload, quiet cluster), where it's
+    # load-bearing.
+    - name: "T0: dump /stats across hub a/b/c (informational)"
+      ravendb_diagnostic:
+        kind: stats_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ hub_id | default(1) }}a", "{{ hub_id | default(1) }}b", "{{ hub_id | default(1) }}c"]
+        assert_fields: "{{ t0_stats_assert_fields }}"
+        assert_mode: false
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "T0: dump /stats across sink {{ item }} a/b/c (informational)"
+      ravendb_diagnostic:
+        kind: stats_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ item }}a", "{{ item }}b", "{{ item }}c"]
+        assert_fields: "{{ t0_stats_assert_fields }}"
+        assert_mode: false
+      loop: "{{ sink_ids }}"
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.results | map(attribute='msg') | list }}" }
+
+
+# ----- step 5: start the background hub-side and sink-side workloads -------------------------
+
+- name: RPV-1B-SLIM step 5 -- start W-1 + W-2 in background on Hub
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: Launch W-1 (doc CRUD churn, 5-bucket 40/40/20 split, background async)
+      ansible.builtin.command:
+        cmd: "bash {{ playbook_dir }}/../workloads/w1/workload_w1.sh"
+      environment:
+        TARGET:        "{{ hub_id | default(1) }}a"
+        DB_NAME:       "{{ db_name }}"
+        BUCKETS_SPEC:  "{{ workload_buckets_spec }}"
+        RAVEN_DOMAIN:  "{{ ravendb_domain }}"
+        CERT_PEM:      "{{ cert_dir }}/client.pem"
+        CA_CRT:        "{{ cert_ca_crt }}"
+      async: 14400
+      poll: 0
+
+    # W-1C sidecar on hub -- cluster-wide-tx variant, same buckets_spec.
+    # Gated on rpv1b_slim_enable_w1c (default false; see vars.yml).
+    - name: Launch W-1C on hub (cluster-wide tx sidecar, background async)
+      ansible.builtin.command:
+        cmd: "bash {{ playbook_dir }}/../workloads/w1c/workload_w1c.sh"
+      environment:
+        TARGET:        "{{ hub_id | default(1) }}a"
+        DB_NAME:       "{{ db_name }}"
+        BUCKETS_SPEC:  "{{ workload_buckets_spec }}"
+        RAVEN_DOMAIN:  "{{ ravendb_domain }}"
+        CERT_PEM:      "{{ cert_dir }}/client.pem"
+        CA_CRT:        "{{ cert_ca_crt }}"
+      async: 14400
+      poll: 0
+      when: rpv1b_slim_enable_w1c | bool
+
+    - name: Launch W-2 (doc-extension churn, same 5-bucket 40/40/20 split, background async)
+      ansible.builtin.command:
+        cmd: "bash {{ playbook_dir }}/../workloads/w2/workload_w2.sh"
+      environment:
+        TARGET:        "{{ hub_id | default(1) }}a"
+        DB_NAME:       "{{ db_name }}"
+        BUCKETS_SPEC:  "{{ workload_buckets_spec }}"
+        RAVEN_DOMAIN:  "{{ ravendb_domain }}"
+        CERT_PEM:      "{{ cert_dir }}/client.pem"
+        CA_CRT:        "{{ cert_ca_crt }}"
+      async: 14400
+      poll: 0
+
+    # Parallel sink-side workload (single bucket, writing under sink-local/ --
+    # filter-NOT-matching, sink-local only) so the sink isn't silent while hub churns.
+    - name: Launch W-1-Sink on every sink leader (sink-local CRUD churn, background async)
+      ansible.builtin.command:
+        cmd: "bash {{ playbook_dir }}/../workloads/w1/workload_w1.sh"
+      environment:
+        TARGET:        "{{ item }}a"
+        DB_NAME:       "{{ db_name }}"
+        BUCKETS_SPEC:  "sink-local/users:{{ sink_local_seed_count | default(2000) | int }}:100"
+        RAVEN_DOMAIN:  "{{ ravendb_domain }}"
+        CERT_PEM:      "{{ cert_dir }}/client.pem"
+        CA_CRT:        "{{ cert_ca_crt }}"
+      async: 14400
+      poll: 0
+      loop: "{{ sink_ids }}"
+
+    # W-1C sidecar on every sink (mirrors W-1-Sink with same pool).
+    # Gated on rpv1b_slim_enable_w1c (default false; see vars.yml).
+    - name: Launch W-1C-Sink on every sink leader (cluster-wide tx sidecar, background async)
+      ansible.builtin.command:
+        cmd: "bash {{ playbook_dir }}/../workloads/w1c/workload_w1c.sh"
+      environment:
+        TARGET:        "{{ item }}a"
+        DB_NAME:       "{{ db_name }}"
+        BUCKETS_SPEC:  "sink-local/users:{{ sink_local_seed_count | default(2000) | int }}:100"
+        RAVEN_DOMAIN:  "{{ ravendb_domain }}"
+        CERT_PEM:      "{{ cert_dir }}/client.pem"
+        CA_CRT:        "{{ cert_ca_crt }}"
+      async: 14400
+      poll: 0
+      loop: "{{ sink_ids }}"
+      when: rpv1b_slim_enable_w1c | bool
+
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/wait_for_workload_started.yml
+  vars:
+    pidfile: "/tmp/w1-{{ hub_id | default(1) }}a-db1.pid"
+    timeout_secs: 30
+
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/wait_for_workload_started.yml
+  vars:
+    pidfile: "/tmp/w2-{{ hub_id | default(1) }}a-db1.pid"
+    timeout_secs: 30
+
+# W-1C wait_for_started for the HUB sidecar (import; single pidfile).
+# Skipped when rpv1b_slim_enable_w1c is false (no W-1C process -> no pidfile to wait for).
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/wait_for_workload_started.yml
+  vars:
+    pidfile: "/tmp/w1c-{{ hub_id | default(1) }}a-db1.pid"
+    timeout_secs: 30
+  when: rpv1b_slim_enable_w1c | default(false) | bool
+
+# Sink-side workloads run on every sink (import_playbook can't be looped, and sink_ids isn't
+# visible at import scope) -- wait for each sink's pidfile(s) in a looped play instead.
+- name: RPV-1B-SLIM-FANOUT step 5 -- wait for sink-side workloads to start (pidfiles appear)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: "Wait for W-1-Sink pidfile on {{ item }}a"
+      ansible.builtin.wait_for:
+        path: "/tmp/w1-{{ item }}a-db1.pid"
+        state: present
+        timeout: 30
+      loop: "{{ sink_ids }}"
+    - name: "Wait for W-1C-Sink pidfile on {{ item }}a"
+      ansible.builtin.wait_for:
+        path: "/tmp/w1c-{{ item }}a-db1.pid"
+        state: present
+        timeout: 30
+      loop: "{{ sink_ids }}"
+      when: rpv1b_slim_enable_w1c | default(false) | bool
+
+
+# ----- step 6: soak -- let the workloads exercise the cluster for a while --------------------
+# RPV-1 gets its soak time naturally from the 3 upgrade phases (~5-10 min wall time).
+# RPV-1B-SLIM has no upgrade, so without an explicit pause the workloads would only run
+# for the few seconds between step 5 launch and step 11's endpoint stop -- producing
+# essentially no writes (a 10s run yielded +7 hub docs, +9 sink docs, +19 revisions in
+# practice).  A 30-min soak (default) gives W-1 + W-2 + W-1C + sink workloads enough wall
+# time to actually exercise replication and the cluster-wide-tx path before convergence
+# asserts run.  Override -e soak_duration_secs=N to shorten/lengthen.
+- name: RPV-1B-SLIM step 6 -- soak (let workloads churn before endpoint asserts)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: "Soak for {{ soak_duration_secs | default(1800) | int }}s while W-1/W-2/W-1C churn"
+      ansible.builtin.pause:
+        seconds: "{{ soak_duration_secs | default(1800) | int }}"
+
+
+# ----- step 11: endpoint checkpoint -- every node on the new binary, writers still flowing ---
+
+- name: RPV-1B-SLIM step 11 -- endpoint checkpoint (drain + I-13 suite)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: "Endpoint: dump schema version on all nodes (expect all v_new)"
+      ravendb_diagnostic:
+        kind: schema_version
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        nodes: "{{ nodes_all }}"
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    # Drain before the endpoint checkpoint -- marker propagation, since a full docs-drain
+    # wait can't converge while the workloads are still going.
+    - name: "Endpoint: wait for users/sink/marker-* propagation hub -> sink {{ item }} a/b/c"
+      ravendb_wait:
+        kind: marker_propagation
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        source: "{{ hub_id | default(1) }}a"
+        targets: ["{{ item }}a", "{{ item }}b", "{{ item }}c"]
+        marker_id_prefix: "users/sink/marker-"
+        timeout: "{{ marker_propagation_timeout_secs | default(300) | int }}"
+      loop: "{{ sink_ids }}"
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.results | map(attribute='msg') | list }}" }
+
+    # Every node should report the new binary version.
+    - name: "Endpoint: assert schema version parity across all nodes (all v_new)"
+      ravendb_diagnostic:
+        kind: schema_version
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        nodes: "{{ nodes_all }}"
+        require_parity: true
+        assert_mode: true
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    # Confirm the new build's features actually flipped on for the database.
+    - name: "Endpoint: read DatabaseRecord.SupportedFeatures (via hub leader)"
+      ravendb_diagnostic:
+        kind: supported_features
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ hub_id | default(1) }}a"
+        db_name: db1
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    # Filter compliance still holds.
+    - name: "Endpoint: assert filter compliance on sink {{ item }}"
+      ravendb_diagnostic:
+        kind: filter_compliance
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        sink_cluster_leader: "{{ item }}a"
+        db_name: db1
+        allowed_prefixes: ["users/sink/", "orders/sink/", "sink-local/"]
+        assert_mode: true
+      loop: "{{ sink_ids }}"
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.results | map(attribute='msg') | list }}" }
+
+    # Endpoint change-vector boundary check hub -> each sink.
+    - name: "Endpoint I-13b: assert CV-boundary order-side hub -> sink {{ item }}"
+      ravendb_diagnostic:
+        kind: cv_boundary_by_dbid
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        source_nodes: ["{{ hub_id | default(1) }}a", "{{ hub_id | default(1) }}b", "{{ hub_id | default(1) }}c"]
+        receiver_nodes: ["{{ item }}a", "{{ item }}b", "{{ item }}c"]
+        assert_mode: true
+      loop: "{{ sink_ids }}"
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.results | map(attribute='msg') | list }}" }
+
+    # Reverse direction (sink -> hub) is now done structurally by the
+    # hub_sink_doc_set_converged waits at step 12.  With bidi config
+    # (sink -> hub filter '*'), every sink-side write must appear on
+    # hub; hub_sink_doc_set asserts exactly that.  A broken sink -> hub link
+    # surfaces there with the offending missing-on-hub ids listed.  No
+    # separate cv_boundary_by_dbid call needed here.
+
+
+# ----- step 12: stop the workloads, wait for everything to drain, and run the strict asserts -
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/assert_workload_alive.yml
+  vars: { pidfile: "/tmp/w1-{{ hub_id | default(1) }}a-db1.pid" }
+
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/assert_workload_alive.yml
+  vars: { pidfile: "/tmp/w2-{{ hub_id | default(1) }}a-db1.pid" }
+
+# W-1C assert_alive (hub-side sidecar) -- gated on rpv1b_slim_enable_w1c.
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/assert_workload_alive.yml
+  vars: { pidfile: "/tmp/w1c-{{ hub_id | default(1) }}a-db1.pid" }
+  when: rpv1b_slim_enable_w1c | default(false) | bool
+
+
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
+  vars:
+    pidfile: "/tmp/w1-{{ hub_id | default(1) }}a-db1.pid"
+
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
+  vars:
+    pidfile: "/tmp/w2-{{ hub_id | default(1) }}a-db1.pid"
+
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
+  vars:
+    pidfile: "/tmp/w1c-{{ hub_id | default(1) }}a-db1.pid"
+  when: rpv1b_slim_enable_w1c | default(false) | bool
+
+# Stop the sink-side workloads on EVERY sink (import_playbook can't be looped, and sink_ids
+# isn't visible at import scope) -- inline the same TERM/KILL/rm, looped over w1 + w1c pidfiles.
+- name: RPV-1B-SLIM-FANOUT step 12 -- stop sink-side workloads (w1 + w1c on every sink)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: "Stop {{ item.1 }} on sink {{ item.0 }}a + remove pidfile (if any)"
+      ansible.builtin.shell: |
+        pf="/tmp/{{ item.1 }}-{{ item.0 }}a-db1.pid"
+        if [ -f "$pf" ]; then
+          pid=$(cat "$pf"); kill -TERM $pid 2>/dev/null || true; sleep 2; kill -KILL $pid 2>/dev/null || true; rm -f "$pf"
+          echo "WORKLOAD STOPPED  pid=$pid  pidfile=$pf"
+        else
+          echo "WORKLOAD ALREADY EXITED  no pidfile at $pf"
+        fi
+      changed_when: true
+      loop: "{{ sink_ids | product(['w1', 'w1c']) | list }}"
+
+
+# ----- pre-step 12: optional intra-cluster ConsistencyCheck on quiet cluster ----------------
+# Gated on rpv1b_slim_run_consistency_check (default false; see vars.yml).  Workloads were
+# stopped above, so the cluster is quiet.  ConsistencyCheck is intra-cluster only -- it
+# scans hub a/b/c against each other and sink a/b/c against each other.  Cross-cluster
+# (hub vs sink) drift is the job of step 12's hub_sink_doc_set_converged assert.  Used
+# mainly for the "rpv1b-slim on v6.2" exploration: see whether the tool catches anything
+# the harness asserts miss.
+
+# Cooldown gives the cluster time to drain in-flight replication + tombstone cleanup so
+# the tool scans a stable etag frontier instead of catching transient drift mid-settle.
+- name: "RPV-1B-SLIM pre-CC cooldown -- let cluster quiesce before ConsistencyCheck"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: "Pause {{ cc_cooldown_secs | default(60) | int }}s for cluster to settle"
+      ansible.builtin.pause:
+        seconds: "{{ cc_cooldown_secs | default(60) | int }}"
+      when: rpv1b_slim_run_consistency_check | default(false) | bool
+
+- ansible.builtin.import_playbook: ../../../toolbox/consistency_check/run_once.yml
+  vars:
+    db_name: db1
+    net: "{{ docker_network_name }}"
+    state_store_host_port: "{{ cc_state_port | default(8084) | int }}"
+    node_leaders:
+      - { label: "{{ hub_id | default(1) }}a", host: "{{ hub_id | default(1) }}a" }
+      - { label: "{{ hub_id | default(1) }}b", host: "{{ hub_id | default(1) }}b" }
+      - { label: "{{ hub_id | default(1) }}c", host: "{{ hub_id | default(1) }}c" }
+  when: rpv1b_slim_run_consistency_check | default(false) | bool
+
+# ConsistencyCheck is intra-cluster + default-off (exploration only) and run_once.yml is an
+# import_playbook (can't be looped) that binds a single host port.  At fan-out scale we run it
+# on the FIRST sink only as a representative -- all sinks share the same filtered doc set, so
+# first-sink CC proxies for the rest.  Derive the first sink id from hub_id (sink_ids isn't
+# visible at import scope): first sink = hub_id + 1.  Extend this block if you need CC on every
+# sink (each needs its own state_store_host_port).
+- ansible.builtin.import_playbook: ../../../toolbox/consistency_check/run_once.yml
+  vars:
+    db_name: db1
+    net: "{{ docker_network_name }}"
+    state_store_host_port: "{{ cc_state_port | default(8084) | int }}"
+    node_leaders:
+      - { label: "{{ (hub_id | default(1) | int) + 1 }}a", host: "{{ (hub_id | default(1) | int) + 1 }}a" }
+      - { label: "{{ (hub_id | default(1) | int) + 1 }}b", host: "{{ (hub_id | default(1) | int) + 1 }}b" }
+      - { label: "{{ (hub_id | default(1) | int) + 1 }}c", host: "{{ (hub_id | default(1) | int) + 1 }}c" }
+  when: rpv1b_slim_run_consistency_check | default(false) | bool
+
+
+- name: RPV-1B-SLIM step 12 -- final convergence + deep parity (quiet cluster)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    # Per-cluster etag stability.  Simpler than full change-vector equality and immune to
+    # the responsible-node asymmetry that sink clusters show under bidirectional pull.
+    - name: "Final: wait for etag parity across hub a/b/c (quiet drain)"
+      ravendb_wait:
+        kind: etag_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ hub_id | default(1) }}a", "{{ hub_id | default(1) }}b", "{{ hub_id | default(1) }}c"]
+        timeout: "{{ quiesce_budget_secs | default(1200) | int }}"
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "Final: wait for etag parity across sink {{ item }} a/b/c (quiet drain)"
+      ravendb_wait:
+        kind: etag_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ item }}a", "{{ item }}b", "{{ item }}c"]
+        timeout: "{{ quiesce_budget_secs | default(1200) | int }}"
+      loop: "{{ sink_ids }}"
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.results | map(attribute='msg') | list }}" }
+
+    # Per-cluster tombstone convergence -- background cleanup runs on its own timer, so we
+    # wait until the per-node tombstone counts have settled before we assert on them.
+    # Tombstone settle waits -- informational by default.  Cross-replica
+    # tombstone counts lag on whichever node the per-node cleanup hasn't
+    # kicked on; it's not a correctness signal for replication and produced
+    # false-positive timeouts.  Override -e relax_rpv1_tombstone_wait=false
+    # to restore the strict behaviour.  Same shape as relax_rp1_tombstone_wait.
+    - name: "Final: wait for tombstone-count convergence across hub a/b/c"
+      ravendb_wait:
+        kind: stats_field_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ hub_id | default(1) }}a", "{{ hub_id | default(1) }}b", "{{ hub_id | default(1) }}c"]
+        fields: ["CountOfTombstones"]
+        timeout: "{{ tombstone_settle_timeout_secs | default(300) | int }}"
+        poll_interval: 3
+      register: r
+      failed_when: "not (relax_rpv1_tombstone_wait | default(true) | bool) and (r.failed | default(false))"
+    - name: Show result
+      ansible.builtin.debug:
+        msg: "tombstone settle ({{ 'informational' if (relax_rpv1_tombstone_wait | default(true) | bool) else 'strict' }}): {{ r.msg | default('ok') }}"
+
+    - name: "Final: wait for tombstone-count convergence across sink {{ item }} a/b/c"
+      ravendb_wait:
+        kind: stats_field_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ item }}a", "{{ item }}b", "{{ item }}c"]
+        fields: ["CountOfTombstones"]
+        timeout: "{{ tombstone_settle_timeout_secs | default(300) | int }}"
+        poll_interval: 3
+      loop: "{{ sink_ids }}"
+      register: r
+      failed_when: "not (relax_rpv1_tombstone_wait | default(true) | bool) and (r.failed | default(false))"
+    - name: Show result
+      ansible.builtin.debug:
+        msg: "tombstone settle ({{ 'informational' if (relax_rpv1_tombstone_wait | default(true) | bool) else 'strict' }}): {{ r.results | map(attribute='msg') | list }}"
+
+    # Cross-cluster doc-set completeness.  Enumerate every live doc on hub +
+    # sink and verify by set containment that every doc the filter allows
+    # is present, and every sink-side doc that's not sink-local has a hub twin.
+    - name: "Final: hub <-> sink {{ item }} doc-set completeness"
+      ravendb_wait:
+        kind: hub_sink_doc_set_converged
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        hub_cluster_leader:  "{{ hub_id  | default(1) }}a"
+        sink_cluster_leader: "{{ item }}a"
+        allowed_prefixes:    ["users/sink/*", "orders/sink/*"]
+        sink_local_prefixes: []   # bidi sink->hub * -- sink-local must also be on hub
+        timeout: "{{ doc_set_settle_timeout_secs | default(300) | int }}"
+        poll_interval: 5
+      loop: "{{ sink_ids }}"
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.results | map(attribute='msg') | list }}" }
+
+    # Per-cluster /stats parity now that everything is quiet.  Tombstones
+    # excluded from the assertion -- same rationale as T0 and as RP-1:
+    # cross-replica tombstone counts lag on whichever node the per-node
+    # cleanup hasn't kicked on yet, and that's not a correctness signal
+    # for replication.  Tombstone count still appears in the printed
+    # table as info-only.
+    - name: "Final: assert /stats parity across hub a/b/c (I-1+I-5+I-6, tombstones info-only)"
+      ravendb_diagnostic:
+        kind: stats_parity
+        settle_secs: "{{ stats_parity_settle_secs | default(120) | int }}"
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ hub_id | default(1) }}a", "{{ hub_id | default(1) }}b", "{{ hub_id | default(1) }}c"]
+        assert_fields: "{{ t0_stats_assert_fields }}"
+        assert_mode: true
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "Final: assert /stats parity across sink {{ item }} a/b/c (tombstones info-only)"
+      ravendb_diagnostic:
+        kind: stats_parity
+        settle_secs: "{{ stats_parity_settle_secs | default(120) | int }}"
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ item }}a", "{{ item }}b", "{{ item }}c"]
+        assert_fields: "{{ t0_stats_assert_fields }}"
+        assert_mode: true
+      loop: "{{ sink_ids }}"
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.results | map(attribute='msg') | list }}" }
+
+    # Per-bucket revision-count parity -- each bucket is checked on its owning cluster --
+    # plus an orphan-revisions sweep on the hub.
+    - name: "Final: assert revision-count parity for users/hub/* across hub a/b/c (I-2)"
+      ravendb_diagnostic:
+        kind: revision_count_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ hub_id | default(1) }}a", "{{ hub_id | default(1) }}b", "{{ hub_id | default(1) }}c"]
+        id_prefix: users/hub
+        count: "{{ parity_probe_count | default(50) | int }}"
+        assert_mode: true
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "Final: assert revision-count parity for orders/hub/* across hub a/b/c"
+      ravendb_diagnostic:
+        kind: revision_count_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ hub_id | default(1) }}a", "{{ hub_id | default(1) }}b", "{{ hub_id | default(1) }}c"]
+        id_prefix: orders/hub
+        count: "{{ parity_probe_count | default(50) | int }}"
+        assert_mode: true
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "Final: assert revision-count parity for Internal/* across hub a/b/c"
+      ravendb_diagnostic:
+        kind: revision_count_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ hub_id | default(1) }}a", "{{ hub_id | default(1) }}b", "{{ hub_id | default(1) }}c"]
+        id_prefix: Internal
+        count: "{{ parity_probe_count | default(50) | int }}"
+        assert_mode: true
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "Final: assert revision-count parity for users/sink/* across sink {{ item }} a/b/c"
+      ravendb_diagnostic:
+        kind: revision_count_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ item }}a", "{{ item }}b", "{{ item }}c"]
+        id_prefix: users/sink
+        count: "{{ parity_probe_count | default(50) | int }}"
+        assert_mode: true
+      loop: "{{ sink_ids }}"
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.results | map(attribute='msg') | list }}" }
+
+    - name: "Final: assert revision-count parity for orders/sink/* across sink {{ item }} a/b/c"
+      ravendb_diagnostic:
+        kind: revision_count_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ item }}a", "{{ item }}b", "{{ item }}c"]
+        id_prefix: orders/sink
+        count: "{{ parity_probe_count | default(50) | int }}"
+        assert_mode: true
+      loop: "{{ sink_ids }}"
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.results | map(attribute='msg') | list }}" }
+
+    - name: "Final: assert no orphan revisions on hub a/b/c (I-4)"
+      ravendb_diagnostic:
+        kind: orphan_revisions
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ hub_id | default(1) }}a", "{{ hub_id | default(1) }}b", "{{ hub_id | default(1) }}c"]
+        assert_mode: true
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    # Per-bucket doc-id-set parity: each of the five buckets is checked on the cluster
+    # that owns it.
+    - name: "Final: assert users/sink doc-id-set parity across sink {{ item }} a/b/c"
+      ravendb_diagnostic:
+        kind: doc_id_set_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ item }}a", "{{ item }}b", "{{ item }}c"]
+        id_prefix: "users/sink"
+        count: "{{ parity_probe_count | default(50) | int }}"
+        assert_mode: true
+      loop: "{{ sink_ids }}"
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.results | map(attribute='msg') | list }}" }
+
+    - name: "Final: assert orders/sink doc-id-set parity across sink {{ item }} a/b/c"
+      ravendb_diagnostic:
+        kind: doc_id_set_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ item }}a", "{{ item }}b", "{{ item }}c"]
+        id_prefix: "orders/sink"
+        count: "{{ parity_probe_count | default(50) | int }}"
+        assert_mode: true
+      loop: "{{ sink_ids }}"
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.results | map(attribute='msg') | list }}" }
+
+    - name: "Final: assert users/hub doc-id-set parity across hub a/b/c"
+      ravendb_diagnostic:
+        kind: doc_id_set_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ hub_id | default(1) }}a", "{{ hub_id | default(1) }}b", "{{ hub_id | default(1) }}c"]
+        id_prefix: "users/hub"
+        count: "{{ parity_probe_count | default(50) | int }}"
+        assert_mode: true
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "Final: assert orders/hub doc-id-set parity across hub a/b/c"
+      ravendb_diagnostic:
+        kind: doc_id_set_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ hub_id | default(1) }}a", "{{ hub_id | default(1) }}b", "{{ hub_id | default(1) }}c"]
+        id_prefix: "orders/hub"
+        count: "{{ parity_probe_count | default(50) | int }}"
+        assert_mode: true
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "Final: assert Internal doc-id-set parity across hub a/b/c"
+      ravendb_diagnostic:
+        kind: doc_id_set_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ hub_id | default(1) }}a", "{{ hub_id | default(1) }}b", "{{ hub_id | default(1) }}c"]
+        id_prefix: "Internal"
+        count: "{{ parity_probe_count | default(50) | int }}"
+        assert_mode: true
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    # Filter compliance on every sink at the very end.
+    - name: "Final: assert filter compliance on sink {{ item }}"
+      ravendb_diagnostic:
+        kind: filter_compliance
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        sink_cluster_leader: "{{ item }}a"
+        db_name: db1
+        allowed_prefixes: ["users/sink/", "orders/sink/", "sink-local/"]
+        assert_mode: true
+      loop: "{{ sink_ids }}"
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.results | map(attribute='msg') | list }}" }
+
+
+- name: RPV-1B-SLIM -- DONE
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: Show RPV-1B-SLIM-FANOUT PASS banner
+      ansible.builtin.debug:
+        msg: >-
+          RPV-1B-SLIM-FANOUT PASS  hub=[{{ hub_id | default(1) }}a/b/c]
+          sinks={{ sink_ids | length }} ({{ sink_ids | first }}..{{ sink_ids | last }})
+          db=db1
+          steady-state replication + filter geometry + CV-boundary all held across every sink
