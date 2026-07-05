@@ -106,12 +106,20 @@
     # The systemd-wait task above swallows docker-exec failures via failed_when:false,
     # so a container that never spawned (image pull error, name collision on a different
     # network, docker daemon transient) would slip through.  Catch that here.
+    # Retry per-container: at high container counts (e.g. large fan-out topologies) a node
+    # can still be mid-start when first inspected -- retry each until it reports running so a
+    # transient state doesn't fail the whole provision.  failed_when:false lets the assert
+    # below produce the friendly "not running: [...]" message for a genuinely dead container.
     - name: Verify every container is in state=running
       ansible.builtin.shell: |
         docker inspect -f '{% raw %}{{.State.Running}}{% endraw %}' {{ item }} 2>/dev/null || echo "MISSING"
       loop: "{{ container_names }}"
       register: ps_check
       changed_when: false
+      retries: 30
+      delay: 2
+      until: ps_check.stdout | trim == 'true'
+      failed_when: false
 
     - name: Fail loud if any container is missing or not running
       ansible.builtin.assert:
