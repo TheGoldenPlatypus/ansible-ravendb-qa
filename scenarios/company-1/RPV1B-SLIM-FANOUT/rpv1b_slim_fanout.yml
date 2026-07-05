@@ -163,12 +163,12 @@
     # Build the per-sink filter maps once, keyed by every sink cluster id (as a string).
     # define_hub / attach_sinks already iterate the full sink list internally, so we pass
     # the whole list + maps in ONE call each -- no per-sink loop needed here.
-    #   hub -> sink:  filtered to sink_allowed_prefixes (users/sink/*, orders/sink/*)
-    #   sink -> hub:  '*' (unfiltered) so sink-local writes flow back to the hub
-    # Every sink shares the SAME filter (broadcast fan-out).
+    #   hub -> sink <id>:  DISJOINT slice -- users/sink<id>/*, orders/sink<id>/*
+    #   sink -> hub:       '*' (unfiltered) so that sink's sink<id>-local writes flow back
+    # Partitioned fan-out: each sink owns its own slice (mirrors RPV1's disjoint sinks).
     - name: Build per-sink allowed-paths maps
       ansible.builtin.set_fact:
-        sink_allowed_paths_map: "{{ sink_allowed_paths_map | default({}) | combine({ (item | string): sink_allowed_prefixes }) }}"
+        sink_allowed_paths_map: "{{ sink_allowed_paths_map | default({}) | combine({ (item | string): ['users/sink' ~ item ~ '/*', 'orders/sink' ~ item ~ '/*'] }) }}"
         sink_to_hub_paths_map:  "{{ sink_to_hub_paths_map  | default({}) | combine({ (item | string): ['*'] }) }}"
       loop: "{{ sink_ids }}"
 
@@ -234,8 +234,8 @@
   gather_facts: false
   vars_files: [vars.yml]
   tasks:
-    # Users collection -- 2 buckets
-    - name: "Seed users/sink/* on hub {{ hub_id | default(1) }}a/db1 (count={{ bucket_users_sink }}, 1 rev)"
+    # Users collection -- one partition per sink on the hub (users/sink<id>)
+    - name: "Seed users/sink{{ item }}/* on hub {{ hub_id | default(1) }}a/db1 (count={{ bucket_users_sink }}, 1 rev)"
       ravendb_writes:
         kind: docs_revisions
         phase: "{{ pre_cv_toggle_phase }}"
@@ -244,13 +244,14 @@
         ca_cert: "{{ cert_ca_crt }}"
         target: "{{ hub_id | default(1) }}a"
         db_name: db1
-        id_prefix: users/sink
+        id_prefix: "users/sink{{ item }}"
         collection: Users
         count: "{{ bucket_users_sink | default(2000) | int }}"
         revs_per_doc: 1
+      loop: "{{ sink_ids }}"
       register: r
     - name: Show result
-      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+      ansible.builtin.debug: { msg: "{{ r.results | map(attribute='msg') | list }}" }
 
     - name: "Seed users/hub/* on hub {{ hub_id | default(1) }}a/db1 (count={{ bucket_users_hub }}, 1 rev)"
       ravendb_writes:
@@ -269,8 +270,8 @@
     - name: Show result
       ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
-    # Orders collection -- 2 buckets
-    - name: "Seed orders/sink/* on hub {{ hub_id | default(1) }}a/db1 (count={{ bucket_orders_sink }}, 1 rev)"
+    # Orders collection -- one partition per sink on the hub (orders/sink<id>)
+    - name: "Seed orders/sink{{ item }}/* on hub {{ hub_id | default(1) }}a/db1 (count={{ bucket_orders_sink }}, 1 rev)"
       ravendb_writes:
         kind: docs_revisions
         phase: "{{ pre_cv_toggle_phase }}"
@@ -279,13 +280,14 @@
         ca_cert: "{{ cert_ca_crt }}"
         target: "{{ hub_id | default(1) }}a"
         db_name: db1
-        id_prefix: orders/sink
+        id_prefix: "orders/sink{{ item }}"
         collection: Orders
         count: "{{ bucket_orders_sink | default(2000) | int }}"
         revs_per_doc: 1
+      loop: "{{ sink_ids }}"
       register: r
     - name: Show result
-      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+      ansible.builtin.debug: { msg: "{{ r.results | map(attribute='msg') | list }}" }
 
     - name: "Seed orders/hub/* on hub {{ hub_id | default(1) }}a/db1 (count={{ bucket_orders_hub }}, 1 rev)"
       ravendb_writes:
@@ -322,11 +324,11 @@
     - name: Show result
       ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
-    # Sink-side activity: write a sink-local pool that does NOT match the hub->sink filter.
-    # Top-level prefix `sink-local/` so it's easy to tell apart from hub-routed docs in
-    # logs and assertions.  Per Karmel: every replication scenario should have writes on
-    # the sink whenever there are writes on the hub.
-    - name: "Seed sink local (sink-local/users/*, count={{ sink_local_seed_count }}) on {{ item }}a/db1"
+    # Sink-side activity: each sink writes its OWN sink-local pool (sink<id>-local/*) that
+    # does NOT match that sink's hub->sink filter.  Distinct prefix per sink so the sinks
+    # don't collide on the hub when they flow back via sink->hub '*'.  Per Karmel: every
+    # replication scenario should have writes on the sink whenever there are writes on the hub.
+    - name: "Seed sink{{ item }}-local/users/* (count={{ sink_local_seed_count }}) on {{ item }}a/db1"
       ravendb_writes:
         kind: docs
         phase: "{{ pre_cv_toggle_phase }}"
@@ -335,9 +337,9 @@
         ca_cert: "{{ cert_ca_crt }}"
         target: "{{ item }}a"
         db_name: db1
-        id_prefix: "sink-local/users"
+        id_prefix: "sink{{ item }}-local/users"
         count: "{{ sink_local_seed_count | default(2000) | int }}"
-        body_tag: sink-local
+        body_tag: "sink{{ item }}-local"
       loop: "{{ sink_ids }}"
       register: r
     - name: Show result
@@ -345,7 +347,7 @@
 
     # Confirm the filtered pull is actually flowing: a marker document under the sink's
     # allowed prefix should make it from the hub to the sink's cluster.
-    - name: "Wait for users/sink/marker-* propagation hub -> sink {{ item }} a/b/c"
+    - name: "Wait for users/sink{{ item }}/marker-* propagation hub -> sink {{ item }} a/b/c"
       ravendb_wait:
         kind: marker_propagation
         ravendb_domain: "{{ ravendb_domain }}"
@@ -354,7 +356,7 @@
         db_name: db1
         source: "{{ hub_id | default(1) }}a"
         targets: ["{{ item }}a", "{{ item }}b", "{{ item }}c"]
-        marker_id_prefix: "users/sink/marker-"
+        marker_id_prefix: "users/sink{{ item }}/marker-"
         timeout: "{{ filter_drain_budget_secs | default(600) | int }}"
       loop: "{{ sink_ids }}"
       register: r
@@ -417,7 +419,7 @@
         ca_cert: "{{ cert_ca_crt }}"
         sink_cluster_leader: "{{ item }}a"
         db_name: db1
-        allowed_prefixes: ["users/sink/", "orders/sink/", "sink-local/"]
+        allowed_prefixes: ["users/sink{{ item }}/", "orders/sink{{ item }}/", "sink{{ item }}-local/"]
         assert_mode: true
       loop: "{{ sink_ids }}"
       register: r
@@ -445,7 +447,7 @@
         ca_cert: "{{ cert_ca_crt }}"
         db_name: db1
         nodes: ["{{ item }}a", "{{ item }}b", "{{ item }}c"]
-        id_prefix: users/sink
+        id_prefix: "users/sink{{ item }}"
         count: "{{ parity_probe_count | default(50) | int }}"
         assert_mode: true
       loop: "{{ sink_ids }}"
@@ -494,7 +496,27 @@
   gather_facts: false
   vars_files: [vars.yml]
   tasks:
-    - name: Launch W-1 (doc CRUD churn, 5-bucket 40/40/20 split, background async)
+    # Build the hub workload spec dynamically: one bucket per sink partition
+    # (users/sink<id>, orders/sink<id>) plus the hub-only buckets + Internal, so the
+    # hub churns every sink's slice (mirrors RPV1's per-sink workload_buckets_spec).
+    - name: Build per-sink partition bucket specs
+      ansible.builtin.set_fact:
+        _sink_bucket_specs: >-
+          {{ _sink_bucket_specs | default([])
+             + ['users/sink'  ~ item ~ ':' ~ (bucket_users_sink  | default(2000) | int) ~ ':2',
+                'orders/sink' ~ item ~ ':' ~ (bucket_orders_sink | default(2000) | int) ~ ':2'] }}
+      loop: "{{ sink_ids }}"
+    - name: Assemble workload_buckets_spec (per-sink partitions + hub-only + Internal)
+      ansible.builtin.set_fact:
+        workload_buckets_spec: >-
+          {{ (_sink_bucket_specs
+              + ['users/hub:'  ~ (bucket_users_hub  | default(2000) | int) ~ ':2',
+                 'orders/hub:' ~ (bucket_orders_hub | default(2000) | int) ~ ':2',
+                 'Internal:'   ~ (bucket_internal   | default(3000) | int) ~ ':3']) | join('|') }}
+    - name: Show hub workload spec
+      ansible.builtin.debug: { msg: "{{ workload_buckets_spec }}" }
+
+    - name: Launch W-1 (doc CRUD churn across all partitions, background async)
       ansible.builtin.command:
         cmd: "bash {{ playbook_dir }}/../workloads/w1/workload_w1.sh"
       environment:
@@ -536,15 +558,15 @@
       async: 14400
       poll: 0
 
-    # Parallel sink-side workload (single bucket, writing under sink-local/ --
-    # filter-NOT-matching, sink-local only) so the sink isn't silent while hub churns.
+    # Parallel sink-side workload (single bucket, writing under sink<id>-local/ --
+    # filter-NOT-matching, sink-local only) so each sink isn't silent while hub churns.
     - name: Launch W-1-Sink on every sink leader (sink-local CRUD churn, background async)
       ansible.builtin.command:
         cmd: "bash {{ playbook_dir }}/../workloads/w1/workload_w1.sh"
       environment:
         TARGET:        "{{ item }}a"
         DB_NAME:       "{{ db_name }}"
-        BUCKETS_SPEC:  "sink-local/users:{{ sink_local_seed_count | default(2000) | int }}:100"
+        BUCKETS_SPEC:  "sink{{ item }}-local/users:{{ sink_local_seed_count | default(2000) | int }}:100"
         RAVEN_DOMAIN:  "{{ ravendb_domain }}"
         CERT_PEM:      "{{ cert_dir }}/client.pem"
         CA_CRT:        "{{ cert_ca_crt }}"
@@ -560,7 +582,7 @@
       environment:
         TARGET:        "{{ item }}a"
         DB_NAME:       "{{ db_name }}"
-        BUCKETS_SPEC:  "sink-local/users:{{ sink_local_seed_count | default(2000) | int }}:100"
+        BUCKETS_SPEC:  "sink{{ item }}-local/users:{{ sink_local_seed_count | default(2000) | int }}:100"
         RAVEN_DOMAIN:  "{{ ravendb_domain }}"
         CERT_PEM:      "{{ cert_dir }}/client.pem"
         CA_CRT:        "{{ cert_ca_crt }}"
@@ -650,7 +672,7 @@
 
     # Drain before the endpoint checkpoint -- marker propagation, since a full docs-drain
     # wait can't converge while the workloads are still going.
-    - name: "Endpoint: wait for users/sink/marker-* propagation hub -> sink {{ item }} a/b/c"
+    - name: "Endpoint: wait for users/sink{{ item }}/marker-* propagation hub -> sink {{ item }} a/b/c"
       ravendb_wait:
         kind: marker_propagation
         ravendb_domain: "{{ ravendb_domain }}"
@@ -659,7 +681,7 @@
         db_name: db1
         source: "{{ hub_id | default(1) }}a"
         targets: ["{{ item }}a", "{{ item }}b", "{{ item }}c"]
-        marker_id_prefix: "users/sink/marker-"
+        marker_id_prefix: "users/sink{{ item }}/marker-"
         timeout: "{{ marker_propagation_timeout_secs | default(300) | int }}"
       loop: "{{ sink_ids }}"
       register: r
@@ -702,7 +724,7 @@
         ca_cert: "{{ cert_ca_crt }}"
         sink_cluster_leader: "{{ item }}a"
         db_name: db1
-        allowed_prefixes: ["users/sink/", "orders/sink/", "sink-local/"]
+        allowed_prefixes: ["users/sink{{ item }}/", "orders/sink{{ item }}/", "sink{{ item }}-local/"]
         assert_mode: true
       loop: "{{ sink_ids }}"
       register: r
@@ -919,8 +941,8 @@
         db_name: db1
         hub_cluster_leader:  "{{ hub_id  | default(1) }}a"
         sink_cluster_leader: "{{ item }}a"
-        allowed_prefixes:    ["users/sink/*", "orders/sink/*"]
-        sink_local_prefixes: []   # bidi sink->hub * -- sink-local must also be on hub
+        allowed_prefixes:    ["users/sink{{ item }}/*", "orders/sink{{ item }}/*"]
+        sink_local_prefixes: []   # bidi sink->hub * -- this sink's sink<id>-local docs must also be on hub
         timeout: "{{ doc_set_settle_timeout_secs | default(300) | int }}"
         poll_interval: 5
       loop: "{{ sink_ids }}"
@@ -1020,7 +1042,7 @@
         ca_cert: "{{ cert_ca_crt }}"
         db_name: db1
         nodes: ["{{ item }}a", "{{ item }}b", "{{ item }}c"]
-        id_prefix: users/sink
+        id_prefix: "users/sink{{ item }}"
         count: "{{ parity_probe_count | default(50) | int }}"
         assert_mode: true
       loop: "{{ sink_ids }}"
@@ -1036,7 +1058,7 @@
         ca_cert: "{{ cert_ca_crt }}"
         db_name: db1
         nodes: ["{{ item }}a", "{{ item }}b", "{{ item }}c"]
-        id_prefix: orders/sink
+        id_prefix: "orders/sink{{ item }}"
         count: "{{ parity_probe_count | default(50) | int }}"
         assert_mode: true
       loop: "{{ sink_ids }}"
@@ -1067,7 +1089,7 @@
         ca_cert: "{{ cert_ca_crt }}"
         db_name: db1
         nodes: ["{{ item }}a", "{{ item }}b", "{{ item }}c"]
-        id_prefix: "users/sink"
+        id_prefix: "users/sink{{ item }}"
         count: "{{ parity_probe_count | default(50) | int }}"
         assert_mode: true
       loop: "{{ sink_ids }}"
@@ -1083,7 +1105,7 @@
         ca_cert: "{{ cert_ca_crt }}"
         db_name: db1
         nodes: ["{{ item }}a", "{{ item }}b", "{{ item }}c"]
-        id_prefix: "orders/sink"
+        id_prefix: "orders/sink{{ item }}"
         count: "{{ parity_probe_count | default(50) | int }}"
         assert_mode: true
       loop: "{{ sink_ids }}"
@@ -1145,7 +1167,7 @@
         ca_cert: "{{ cert_ca_crt }}"
         sink_cluster_leader: "{{ item }}a"
         db_name: db1
-        allowed_prefixes: ["users/sink/", "orders/sink/", "sink-local/"]
+        allowed_prefixes: ["users/sink{{ item }}/", "orders/sink{{ item }}/", "sink{{ item }}-local/"]
         assert_mode: true
       loop: "{{ sink_ids }}"
       register: r

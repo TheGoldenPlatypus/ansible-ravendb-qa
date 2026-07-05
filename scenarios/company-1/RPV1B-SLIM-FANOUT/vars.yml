@@ -31,37 +31,42 @@ hub_cluster_nodes:
   - "{{ hub_id | default(1) }}b"
   - "{{ hub_id | default(1) }}c"
 
-# ---------- Seed -- 5 prefix buckets on Hub, 11k docs total -----------------
-# Override per bucket with -e bucket_X=N for a fast dev shakedown.
+# ---------- Seed -- per-sink partitions on Hub + hub-only buckets -----------
+# Partitioned fan-out (mirrors RPV1's disjoint-sink model): the hub seeds a
+# DISTINCT slice per sink -- users/sink<id>/*, orders/sink<id>/* -- plus the
+# hub-only buckets that stay on the hub.  bucket_users_sink/bucket_orders_sink
+# are now PER-SINK counts, so total sink docs = count * sink_count * 2.  Drop
+# them (e.g. -e bucket_users_sink=500) for a lighter run at high sink_count.
 bucket_users_sink:  2000
 bucket_users_hub:   2000
 bucket_orders_sink: 2000
 bucket_orders_hub:  2000
 bucket_internal:    3000
 
-# ---------- Sink-local seed (symmetric writes on the sink) ------------------
+# ---------- Sink-local seed (symmetric writes on each sink) -----------------
 # Per Karmel: every replication scenario needs writes on the sink whenever there
-# are writes on the hub.  We seed `sink-local/users/*` on the sink leader at step 3
-# and run a parallel single-bucket workload on the sink through the run (step 5).
-# The `sink-local/` prefix is intentionally outside the hub->sink filter so the
-# docs are sink-local-only.  Whitelisted in every filter_compliance call via the
-# third entry in `allowed_prefixes`.
+# are writes on the hub.  Each sink seeds its OWN prefix `sink<id>-local/users/*`
+# (distinct per sink -- mirrors RPV1's sink1-local/sink2-local -- so the sinks
+# don't collide on the hub when they flow back via sink->hub '*').  The
+# `sink<id>-local/` prefix is outside that sink's hub->sink filter, so the docs
+# are sink-local-only.  Whitelisted per sink in every filter_compliance call.
 sink_local_seed_count: 2000
 
-# ---------- Filter spec -- hub-only collections stay on hub -----------------
-sink_allowed_prefixes: ["users/sink/*", "orders/sink/*"]
+# ---------- Filter spec -- disjoint per-sink slices -------------------------
+# Each sink <id> receives only its own slice: users/sink<id>/*, orders/sink<id>/*.
+# Built per sink in step 2's set_fact loop (keyed by cluster id); hub-only
+# buckets (users/hub, orders/hub, Internal) are filtered out of every sink.
 
 # ---------- Default-segment fallback for the per-collection revisions config -----------
 default_keep: 25
 default_max_age_secs: 21600
 
-# ---------- Workload -- W-1 + W-2 + W-1C on Hub, W-1 + W-1C on Sink ---------
+# ---------- Workload -- W-1 + W-2 + W-1C on Hub, W-1 + W-1C on each Sink -----
 # Workloads run continuously from launch through endpoint, stopped explicitly by
-# step 12.  5-bucket split keeping the original 40/40/20 collection weights:
-#   users    = sink(20) + hub(20) = 40
-#   orders   = sink(20) + hub(20) = 40
-#   Internal = 20
-workload_buckets_spec: "users/sink:{{ bucket_users_sink | default(2000) | int }}:20|orders/sink:{{ bucket_orders_sink | default(2000) | int }}:20|users/hub:{{ bucket_users_hub | default(2000) | int }}:20|orders/hub:{{ bucket_orders_hub | default(2000) | int }}:20|Internal:{{ bucket_internal | default(3000) | int }}:20"
+# step 12.  The hub churns EVERY sink's partition (users/sink<id>, orders/sink<id>)
+# plus the hub-only buckets + Internal -- mirrors RPV1's per-sink workload spec.
+# Because the partition set is dynamic (sink_count sinks), workload_buckets_spec
+# is BUILT at step 5 via a set_fact loop over sink_ids rather than hardcoded here.
 
 # ---------- Probe sets for parity asserts -----------------------------------
 parity_probe_count: 50
