@@ -1,18 +1,8 @@
-##################################################################################################
-# toolbox/service/remove_node.yml
+# toolbox/service/remove_node.yml -- remove a node from its cluster via RavenDB's cluster admin API (process stays alive).
 #
-# Removes a node from its cluster using RavenDB's cluster admin API.  The node stays alive
-# as a process; only its cluster membership is severed.  Pairs with add_node.yml for
-# exercising add/remove cycles.
+# Inputs:  cluster_leader (required; any current member), target_tag (required; single-letter cluster tag to remove).
 #
-# INPUTS:
-#   cluster_leader  REQUIRED.  Container name of any current cluster member (e.g. 1a).
-#   target_tag      REQUIRED.  Single-letter cluster tag of the node to remove (e.g. C).
-#                              Must be a Member or Promotable of the cluster.
-#
-# RUN EXAMPLE:
-#   ansible-playbook toolbox/service/remove_node.yml -e cluster_leader=1a -e target_tag=D
-##################################################################################################
+# Example: ansible-playbook toolbox/service/remove_node.yml -e cluster_leader=1a -e target_tag=D
 
 - name: Remove a node from its cluster
   hosts: localhost

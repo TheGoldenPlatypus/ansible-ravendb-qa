@@ -23,8 +23,7 @@ def _install_ansible_shim():
         sys.modules["ansible"].module_utils = mu
 
     def _install(util_name):
-        """Load module_utils/<util_name>.py under both `ansible.module_utils.<name>`
-        and bare `<name>` so kinds + tests see the same module object."""
+        """Load module_utils/<util_name>.py under both dotted and bare names."""
         spec = importlib.util.spec_from_file_location(
             "ansible.module_utils." + util_name,
             str(REPO_ROOT / "module_utils" / (util_name + ".py")),
@@ -39,8 +38,6 @@ def _install_ansible_shim():
     mod = _install("ravendb_client")
     _install("polling")
 
-    # Minimal AnsibleModule stub -- diagnostic imports it but tests call kinds
-    # directly, not through main(), so this rarely matters.
     if "ansible.module_utils.basic" not in sys.modules:
         basic = types.ModuleType("ansible.module_utils.basic")
         class _StubModule:
@@ -56,70 +53,6 @@ def _install_ansible_shim():
 _install_ansible_shim()
 
 
-# ---------------------------------------------------------------------------
-# Unit-test isolation: stub resolve_db_admin_route.
-#
-# Every write/smuggler/tasks/revisions/diagnostic kind starts by calling
-# resolve_db_admin_route(target, db, ...) to route past a sharded
-# orchestrator.  In a unit test that helper would hit the real network
-# (load a cert, open an HTTPS socket).  Tests monkeypatch the kind's own
-# `request` but not the one called from inside resolve_db_admin_route, so
-# the helper dies on a fake cert path before the kind's own logic runs.
-#
-# This autouse fixture replaces resolve_db_admin_route with a pure
-# passthrough across all modules that import it.  Integration tests opt
-# out via marker (they need real routing against an embedded RavenDB).
-# ---------------------------------------------------------------------------
-
-_KINDS_WITH_ROUTE = (
-    "ravendb_writes", "ravendb_smuggler", "ravendb_tasks",
-    "ravendb_revisions", "ravendb_diagnostic", "ravendb_features",
-    "ravendb_wait",
-)
-
-
-def _passthrough_route(target, db, domain, client_cert, ca_cert):
-    return target
-
-
-def _passthrough_orchestrator(target, domain, db, client_cert, ca_cert,
-                              timeout=30):
-    """Stub for orchestrator_for in unit tests.  Pretend `target` is its own
-    orchestrator -- tests that exercise sharded routing import the real one
-    and monkeypatch it themselves (file name suffix `_orchestrator` or
-    `_sharded` skips this stub)."""
-    return target
-
-
-@pytest.fixture(autouse=True)
-def _stub_resolve_db_admin_route_for_unit(request, monkeypatch):
-    """Auto-applied in unit tests; skipped in integration tests (real routing
-    against an embedded RavenDB), and skipped in tests that specifically
-    exercise resolve_db_admin_route / orchestrator_for themselves (opt out by
-    adding the marker `needs_real_route` or naming the file
-    `*resolve_db_admin*`, `*_sharded.py`, or `*orchestrator*`)."""
-    fspath = str(getattr(request.node, "fspath", "")).replace("\\", "/")
-    if "/integration/" in fspath:
-        return
-    fname = fspath.rsplit("/", 1)[-1]
-    if ("resolve_db_admin" in fname
-            or "orchestrator" in fname
-            or fname.endswith("_sharded.py")):
-        return
-    if request.node.get_closest_marker("needs_real_route"):
-        return
-    import importlib
-    for mod_name in _KINDS_WITH_ROUTE:
-        try:
-            mod = importlib.import_module(mod_name)
-        except Exception:
-            continue
-        if hasattr(mod, "resolve_db_admin_route"):
-            monkeypatch.setattr(mod, "resolve_db_admin_route", _passthrough_route)
-        if hasattr(mod, "orchestrator_for"):
-            monkeypatch.setattr(mod, "orchestrator_for", _passthrough_orchestrator)
-
-
 _BANNER_SEEN = set()
 
 
@@ -130,8 +63,6 @@ def pytest_runtest_logstart(nodeid, location):
         return
     _BANNER_SEEN.add(file_path)
 
-    # The nodeid is relative to the pytest invocation cwd.  Resolve against
-    # both the repo root and tests/ — whichever exists wins.
     candidates = [
         REPO_ROOT / file_path,
         REPO_ROOT / "tests" / file_path,
@@ -149,8 +80,6 @@ def pytest_runtest_logstart(nodeid, location):
     if not docstring:
         return
 
-    # Write directly to the real stdout + flush so the banner survives any
-    # pytest output capture that may still be active inside this hook.
     out = sys.__stdout__
     out.write("\n\n\n")
     out.write("#" * 100 + "\n")

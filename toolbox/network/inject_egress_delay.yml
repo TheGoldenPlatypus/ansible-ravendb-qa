@@ -1,25 +1,8 @@
-##################################################################################################
-# toolbox/network/inject_egress_delay.yml
+# toolbox/network/inject_egress_delay.yml -- add fixed egress latency to a container's interface via tc netem.
 #
-# Add a fixed egress latency to a container's primary interface via `tc qdisc netem`.  Used by
-# RP-2 phase (b) sub-phase "out-of-order injection" -- holds packets on hub node 1a long enough
-# to reorder arrival at sink relative to other hub peers.
+# Inputs:  target, delay_ms (required); interface (default "eth0").
 #
-# Pairs with clear_egress_delay.yml -- always clear before scenario teardown or the qdisc
-# persists across runs (it's bound to the container's eth0, not the network).
-#
-# DOCKER MODE ONLY for now (matches the rest of toolbox/network/*).  SSH-mode variant would
-# need `become: true` + `tc` installed on the host.
-#
-# INPUTS:
-#   target        REQUIRED.  Container name (e.g. 1a).
-#   delay_ms      REQUIRED.  Delay in milliseconds (e.g. 2000).
-#   interface     OPTIONAL.  Default "eth0".
-#
-# RUN:
-#   ansible-playbook toolbox/network/inject_egress_delay.yml -K \
-#       -e target=1a -e delay_ms=2000
-##################################################################################################
+# Example: ansible-playbook toolbox/network/inject_egress_delay.yml -K -e target=1a -e delay_ms=2000
 
 - name: Inject egress delay via tc netem
   hosts: localhost

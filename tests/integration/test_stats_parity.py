@@ -1,15 +1,4 @@
-"""
-Tests for k_stats_parity.
-
-What the kind does:  reads full /stats per node, prints a per-field table,
-                     asserts uniformity on `assert_fields` (default = ~9
-                     doc/attachment/conflict/revision/tombstone counts).
-                     Intrinsic per-node fields (counters, TS segments, size)
-                     get a 'DRIFT (info)' label, not FAIL.
-Returns:             list[str]
-Raises:              ValueError if no probed node has the database.
-                     DiagnosticViolation in assert_mode on asserted-field drift.
-"""
+"""Tests for k_stats_parity."""
 
 import pytest
 
@@ -32,7 +21,7 @@ def test_stats_parity_passes_trivially_on_single_node(ravendb_cluster):
 
 
 def test_passes_when_two_nodes_have_identical_stats(ravendb_cluster):
-    """Two empty independent nodes -> every field is 0 on both -> PASS."""
+    """Two empty nodes -> every field 0 -> PASS."""
     info = ravendb_cluster(n_nodes=2, cluster=False)
     n1, n2 = info["nodes"]
 
@@ -46,8 +35,7 @@ def test_passes_when_two_nodes_have_identical_stats(ravendb_cluster):
 
 
 def test_fails_on_count_of_documents_divergence(ravendb_cluster):
-    """CountOfDocuments is in the default asserted set.  Divergent doc counts
-    => MISMATCH + 'FAIL  /stats parity broken on' line."""
+    """Divergent CountOfDocuments -> MISMATCH and FAIL line."""
     info = ravendb_cluster(n_nodes=2, cluster=False)
     n1, n2 = info["nodes"]
 
@@ -56,7 +44,7 @@ def test_fails_on_count_of_documents_divergence(ravendb_cluster):
     for i in range(2):
         write_doc(n2, f"users/{i}", {"i": i})
 
-    lines = diag.k_stats_parity(params(nodes=[n1, n2]))   # info mode
+    lines = diag.k_stats_parity(params(nodes=[n1, n2]))
     text = "\n".join(lines)
 
     print(f"\n    expected: contains 'MISMATCH' and 'FAIL  /stats parity broken on'"
@@ -84,9 +72,7 @@ def test_assert_mode_raises_on_divergence(ravendb_cluster):
 
 
 def test_assert_fields_override_narrows_what_fails(ravendb_cluster):
-    """CountOfDocuments diverges, but assert_fields=['CountOfTombstones']
-    => only CountOfTombstones is checked (both 0, uniform) => no FAIL.
-    CountOfDocuments shows as DRIFT (info), not MISMATCH."""
+    """assert_fields limits checks to CountOfTombstones -> no FAIL, doc drift is info-only."""
     info = ravendb_cluster(n_nodes=2, cluster=False)
     n1, n2 = info["nodes"]
 
@@ -107,11 +93,11 @@ def test_assert_fields_override_narrows_what_fails(ravendb_cluster):
     print(f"    actual:   {lines[-1]!r}\n")
     assert "PASS" in text
     assert "FAIL" not in text
-    assert "DRIFT (info)" in text   # CountOfDocuments diverges, gets DRIFT label
+    assert "DRIFT (info)" in text
 
 
 def test_all_nodes_unreachable_raises(ravendb_cluster):
-    info = ravendb_cluster(n_nodes=1)   # real server so the fixture cleans up
+    info = ravendb_cluster(n_nodes=1)
 
     import ravendb_client
     ravendb_client.TARGET_URL_OVERRIDES.clear()

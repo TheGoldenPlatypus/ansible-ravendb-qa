@@ -1,24 +1,12 @@
-##################################################################################################
-# toolbox/wait/wait_for_marker_propagation.yml
+# toolbox/wait/wait_for_marker_propagation.yml -- PUT a unique marker doc on source, then poll
+# every target node until it appears.
 #
-# PUT a uniquely-IDed marker doc on `source`, then poll every node in `targets` until the
-# marker appears (or fail after the budget).  End-to-end "replication is flowing" check;
-# complements wait_for_quiescence (steady state) by proving the wire actually moves.
+# Inputs:  db_name, source (node to PUT on e.g. 1a), targets (JSON list of nodes to poll)
+#          (required); timeout_secs (optional, default 60); marker_id_prefix (optional, default
+#          "markers/").
 #
-# INPUTS:
-#   db_name             REQUIRED.
-#   source              REQUIRED.  Node to PUT the marker on (e.g. 1a).
-#   targets             REQUIRED.  JSON list of nodes to poll (e.g. ["1b","1c"]).
-#   timeout_secs        OPTIONAL.  Default 60.
-#   marker_id_prefix    OPTIONAL.  Default "markers/".  Override when the source->target leg
-#                                  has a filter that wouldn't admit the default prefix
-#                                  (e.g. marker_id_prefix=users/sink1/marker- for a sink
-#                                  filtered to users/sink1/*).
-#
-# RUN EXAMPLE:
-#   ansible-playbook toolbox/wait/wait_for_marker_propagation.yml \
-#       -e db_name=db1 -e source=1a -e '{"targets":["1b","1c"]}'
-##################################################################################################
+# Example: ansible-playbook toolbox/wait/wait_for_marker_propagation.yml \
+#              -e db_name=db1 -e source=1a -e '{"targets":["1b","1c"]}'
 
 - name: Marker propagation
   hosts: localhost

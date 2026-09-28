@@ -1,27 +1,20 @@
-##################################################################################################
 # playbooks/setup_ssh_targets.yml
 #
-# Bootstraps SSH-mode targets (VMs / bare metal / cloud / other computers) for the chaos
-# harness.  This is the SSH-mode equivalent of provision_nodes.yml -- but the machines
-# already exist (you brought them); all this does is verify access and install host-side
-# prereqs.
+# Bootstraps SSH-mode targets (VMs / bare metal / cloud / other computers) for
+# the chaos harness: verifies access and installs host-side prereqs. The
+# SSH-mode equivalent of provision_nodes.yml.
 #
-# What it does NOT do: writing the ANSIBLE MANAGED CHAOS LAB /etc/hosts block.  That belongs
-# in form_clusters.yml (which already does it for docker mode using the same data).  At this
-# stage you don't yet know what the cluster shape is -- just that the hosts are reachable.
-#
-# What it does, in order:
-#   1. Asserts target_mode == ssh (refuses to run in docker mode -- that's provision_nodes.yml's job).
-#   2. SSH-pings every host in the ravendb_nodes group (proves the controller can reach each Pi).
+# What it does:
+#   1. Asserts target_mode == ssh.
+#   2. SSH-pings every host in the ravendb_nodes group.
 #   3. Installs apt prereqs (iptables, python3) where missing.
 #
-# After this, run:
+# Then run:
 #   ansible-playbook -i inventory/ssh_hosts.yml playbooks/install_ravendb.yml
 #   ansible-playbook -i inventory/ssh_hosts.yml playbooks/form_clusters.yml
 #
-# RUN EXAMPLE:
+# Run:
 #   ansible-playbook -i inventory/ssh_hosts.yml playbooks/setup_ssh_targets.yml
-##################################################################################################
 
 - name: Sanity check + show plan
   hosts: localhost
@@ -73,8 +66,6 @@
         path: /backups
         state: directory
         mode: "0777"
-      # Note: chowned to ravendb after install_ravendb.yml runs the ravendb_node role.
-      # Until then 0777 keeps the dir usable without knowing the uid.
 
 
 - name: Done

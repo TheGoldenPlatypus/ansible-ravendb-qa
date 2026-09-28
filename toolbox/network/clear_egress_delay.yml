@@ -1,16 +1,8 @@
-##################################################################################################
-# toolbox/network/clear_egress_delay.yml
+# toolbox/network/clear_egress_delay.yml -- remove the netem qdisc installed by inject_egress_delay.yml.
 #
-# Remove the root netem qdisc previously installed by inject_egress_delay.yml.  Idempotent --
-# `tc qdisc del` on a missing qdisc returns 2; we tolerate that so cleanup is safe to run blind.
+# Inputs:  target (required); interface (default "eth0").
 #
-# INPUTS:
-#   target      REQUIRED.  Container name (e.g. 1a).
-#   interface   OPTIONAL.  Default "eth0".
-#
-# RUN:
-#   ansible-playbook toolbox/network/clear_egress_delay.yml -K -e target=1a
-##################################################################################################
+# Example: ansible-playbook toolbox/network/clear_egress_delay.yml -K -e target=1a
 
 - name: Clear egress delay
   hosts: localhost
@@ -29,7 +21,7 @@
         cmd: docker exec {{ target }} tc qdisc del dev {{ interface | default('eth0') }} root
       register: out
       changed_when: out.rc == 0
-      failed_when: out.rc not in [0, 2]   # rc=2 = nothing to delete
+      failed_when: out.rc not in [0, 2]
 
     - name: Done
       ansible.builtin.debug:

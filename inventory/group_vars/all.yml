@@ -1,27 +1,18 @@
-# target_mode is INTENTIONALLY NOT SET HERE.
-# It's controlled by the inventory: pass -i inventory/ssh_hosts.yml to select ssh mode (that file
-# sets target_mode: ssh on the all group).  Without -i, target_mode is unset and every check
-# in the playbooks falls back to `default('docker')`, giving you the docker workflow.
-#
-# Why not set the default here?  group_vars/all.yml outranks inline inventory vars, so a
-# default of `target_mode: docker` here would silently override `ssh_hosts.yml`'s `ssh` setting.
+# target_mode is not set here. Pass -i inventory/ssh_hosts.yml to select ssh mode;
+# without -i it defaults to docker.
 
 clusters_count: 1
 nodes_per_cluster: 3
 
-docker_network_name: hubsinknet
+docker_network_name: ravendb-qa
 docker_image: docker.io/geerlingguy/docker-ubuntu2204-ansible:latest
 
-# Force the python interpreter inside the geerlingguy container.  Without this, ansible's
-# auto-discovery can pick a python whose `setup` module returns non-JSON-encodable objects
-# from the community.docker.docker connection plugin, causing "ValueError: unmarshallable
-# object" on every task running against the docker hosts.
 ansible_python_interpreter: /usr/bin/python3
 
-ravendb_domain: hubsink.test
+ravendb_domain: ravendb.test
 rdb_version: 7.2.2
 
-cert_dir: /home/kaiju-1/company-1/selfsignedmaterials
+cert_dir: /home/certs
 cert_server_pfx: "{{ cert_dir }}/server.pfx"
 cert_ca_crt: "{{ cert_dir }}/ca.crt"
 cert_ca_key: "{{ cert_dir }}/ca.key"

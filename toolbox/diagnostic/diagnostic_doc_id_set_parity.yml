@@ -1,22 +1,12 @@
-##################################################################################################
-# toolbox/diagnostic/diagnostic_doc_id_set_parity.yml
+# toolbox/diagnostic/diagnostic_doc_id_set_parity.yml -- report per-id presence across nodes.
 #
-# For a probe set of doc ids, reports per-id presence across nodes.  Info by default; pass
-# assert_mode=true to fail when any id is present on some nodes and absent on others.
+# Inputs:  db_name, nodes (required); provide either ids (optional, JSON list of doc ids) or
+#          id_prefix + count (count required when id_prefix is set); assert_mode (optional,
+#          default false).
 #
-# INPUTS (provide EITHER ids OR id_prefix+count):
-#   db_name      REQUIRED.
-#   nodes        REQUIRED.
-#   ids          OPTIONAL.  JSON list of doc ids to probe.
-#   id_prefix    OPTIONAL.  Builds ids <id_prefix>/0..count-1.
-#   count        OPTIONAL.  Required if id_prefix is set.
-#   assert_mode  OPTIONAL.  Default false.
-#
-# RUN EXAMPLE:
-#   ansible-playbook toolbox/diagnostic/diagnostic_doc_id_set_parity.yml \
-#       -e db_name=Tenants -e id_prefix=users/sink1 -e count=50 \
-#       -e '{"nodes":["1a","1b","1c"]}'
-##################################################################################################
+# Example: ansible-playbook toolbox/diagnostic/diagnostic_doc_id_set_parity.yml \
+#              -e db_name=Tenants -e id_prefix=users/1 -e count=50 \
+#              -e '{"nodes":["1a","1b","1c"]}'
 
 - name: Per-id existence parity across nodes
   hosts: localhost

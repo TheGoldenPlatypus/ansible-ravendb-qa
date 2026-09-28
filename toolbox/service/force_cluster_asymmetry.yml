@@ -1,36 +1,8 @@
-##################################################################################################
-# toolbox/service/force_cluster_asymmetry.yml
+# toolbox/service/force_cluster_asymmetry.yml -- upgrade specific nodes to specific versions/builds per version_map.
 #
-# Forces a cluster into an ASYMMETRIC version state by upgrading specific nodes to specific
-# RavenDB versions (or custom builds), per a user-supplied version_map.  Useful for testing
-# backward-compat scenarios during a rolling upgrade -- a real fix often has to keep
-# replication functional while some nodes are on the new build and others are still on the
-# old build, since customers can't upgrade every node in lockstep.
+# Inputs:  version_map (required; dict of container name -> version or .deb path, passed as JSON).
 #
-# Implementation note: this is a thin wrapper that shells out to toolbox/service/upgrade_node.yml
-# once per entry in version_map.  Each entry's value is interpreted as:
-#   * a URL or local .deb path -> passed as -e custom_build=... --skip-tags download
-#   * anything else            -> passed as -e rdb_version=...
-#
-# The parent's -K prompt is forwarded to child invocations via ANSIBLE_BECOME_PASS.
-#
-# INPUTS:
-#   version_map  REQUIRED.  Dict mapping container names to target versions or build paths.
-#                           Pass as JSON on the CLI.
-#
-# RUN EXAMPLES:
-#   # asymmetric hub: 1b on 7.2.3, 1c on a dev .deb, 1a left untouched
-#   ansible-playbook toolbox/service/force_cluster_asymmetry.yml -K \
-#       -e '{"version_map":{"1b":"7.2.3","1c":"/tmp/raven-feature-branch.deb"}}'
-#
-#   # asymmetric across clusters: hub on new version, sink left on old (cross-version repl test)
-#   ansible-playbook toolbox/service/force_cluster_asymmetry.yml -K \
-#       -e '{"version_map":{"1a":"7.2.3","1b":"7.2.3","1c":"7.2.3"}}'
-#
-#   # symmetric upgrade of the whole hub cluster (degenerate case -- all entries same version)
-#   ansible-playbook toolbox/service/force_cluster_asymmetry.yml -K \
-#       -e '{"version_map":{"1a":"/tmp/raven-x.deb","1b":"/tmp/raven-x.deb","1c":"/tmp/raven-x.deb"}}'
-##################################################################################################
+# Example: ansible-playbook toolbox/service/force_cluster_asymmetry.yml -K -e '{"version_map":{"1b":"7.2.3","1c":"/tmp/raven.deb"}}'
 
 - name: Force a cluster into the requested asymmetric version state
   hosts: localhost
@@ -56,11 +28,6 @@
 
     - name: Run toolbox/service/upgrade_node.yml for each entry
       ansible.builtin.command:
-        # Forward docker_network_name so upgrade_node targets the SAME network as the
-        # caller; otherwise the subprocess ansible-playbook falls back to its 'hubsinknet'
-        # default and operates on the wrong containers under parallel scenarios.
-        # playbook_dir here = .../toolbox/service/, so chdir goes up TWO levels (../../)
-        # to reach the repo root where 'toolbox/service/upgrade_node.yml' resolves.
         cmd: >-
           ansible-playbook toolbox/service/upgrade_node.yml
           -e target={{ item.key }}

@@ -1,27 +1,11 @@
-##################################################################################################
-# toolbox/diagnostic/diagnostic_stats_parity.yml
+# toolbox/diagnostic/diagnostic_stats_parity.yml -- one /stats GET per node; print a table of
+# 11 Count* fields plus SizeOnDisk.
 #
-# Consolidated /stats parity check -- one GET per node, prints a single table covering 11
-# Count* fields + SizeOnDisk (informational).
+# Inputs:  db_name, nodes (required); assert_fields (optional, subset of fields to assert on);
+#          assert_mode (optional, default false).
 #
-# By default (assert_mode=false) the table is printed but no failure is raised.  Pass
-# assert_mode=true to fail when an asserted field differs across nodes.  Default asserted set
-# excludes CountOfCounterEntries + CountOfTimeSeriesSegments (per-node intrinsic per upstream
-# guidance) -- those show as "drift (info)" instead of MISMATCH.
-#
-# INPUTS:
-#   db_name        REQUIRED.
-#   nodes          REQUIRED.
-#   assert_fields  OPTIONAL.  Subset of fields to assert on.
-#   assert_mode    OPTIONAL.  Default false.
-#
-# RUN EXAMPLES:
-#   ansible-playbook toolbox/diagnostic/diagnostic_stats_parity.yml \
-#       -e db_name=db1 -e '{"nodes":["1a","1b","1c"]}'
-#
-#   ansible-playbook toolbox/diagnostic/diagnostic_stats_parity.yml -e assert_mode=true \
-#       -e db_name=db1 -e '{"nodes":["1a","1b","1c"]}'
-##################################################################################################
+# Example: ansible-playbook toolbox/diagnostic/diagnostic_stats_parity.yml \
+#              -e db_name=db1 -e '{"nodes":["1a","1b","1c"]}'
 
 - name: /stats consolidated parity across nodes
   hosts: localhost

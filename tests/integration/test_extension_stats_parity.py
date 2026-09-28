@@ -1,14 +1,4 @@
-"""
-Tests for k_extension_stats_parity.
-
-What the kind does:  like stats_parity but only for the extension counts --
-                     attachments / counters / timeseries.  Configurable via
-                     `aspects` CSV (default = all three).  PASSes if every
-                     selected field matches across nodes; FAILs on drift.
-Returns:             list[str]
-Raises:              ValueError if no probed node has the database.
-                     DiagnosticViolation in assert_mode on drift.
-"""
+"""Tests for k_extension_stats_parity."""
 
 import pytest
 
@@ -17,8 +7,7 @@ from raven_lab import add_attachment, params, print_lines, write_doc
 
 
 def test_passes_when_two_empty_dbs_have_no_extensions(ravendb_cluster):
-    """Both nodes start with empty DBs -> all extension counts are 0 on both
-    -> PASS regardless of which aspects are checked."""
+    """Two empty dbs -> all extension counts 0 -> PASS."""
     info = ravendb_cluster(n_nodes=2, cluster=False)
     n1, n2 = info["nodes"]
 
@@ -33,8 +22,7 @@ def test_passes_when_two_empty_dbs_have_no_extensions(ravendb_cluster):
 
 
 def test_fails_when_attachment_count_drifts(ravendb_cluster):
-    """One node has an attachment, the other doesn't -> CountOfAttachments
-    differs -> FAIL line lists 'CountOfAttachments' as drifted."""
+    """Attachment on one node only -> FAIL on CountOfAttachments."""
     info = ravendb_cluster(n_nodes=2, cluster=False)
     n1, n2 = info["nodes"]
 
@@ -67,8 +55,7 @@ def test_assert_mode_raises_on_drift(ravendb_cluster):
 
 
 def test_aspect_filter_narrows_what_is_checked(ravendb_cluster):
-    """Same attachment drift, but aspects='counters' -> kind only inspects
-    CountOfCounterEntries (both 0) -> PASS, attachment drift ignored."""
+    """aspects='counters' ignores attachment drift -> PASS."""
     info = ravendb_cluster(n_nodes=2, cluster=False)
     n1, n2 = info["nodes"]
 
@@ -87,7 +74,7 @@ def test_aspect_filter_narrows_what_is_checked(ravendb_cluster):
 
 
 def test_all_nodes_unreachable_raises(ravendb_cluster):
-    info = ravendb_cluster(n_nodes=1)   # real server so the fixture cleans up
+    info = ravendb_cluster(n_nodes=1)
 
     import ravendb_client
     ravendb_client.TARGET_URL_OVERRIDES.clear()

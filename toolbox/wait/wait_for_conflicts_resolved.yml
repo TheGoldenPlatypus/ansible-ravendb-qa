@@ -1,23 +1,11 @@
-##################################################################################################
-# toolbox/wait/wait_for_conflicts_resolved.yml
+# toolbox/wait/wait_for_conflicts_resolved.yml -- wait until /replication/conflicts reports
+# zero conflicts on every node.
 #
-# Waits until /databases/<db>/replication/conflicts reports zero conflicts on every probed
-# node.  Use after a heal-from-partition step where concurrent writes on both sides created
-# conflicts -- asserts the cluster's conflict resolver converges within a bounded budget.
+# Inputs:  db_name, nodes (required, JSON list); timeout_secs (optional, default 60);
+#          poll_interval (optional, default 2).
 #
-# Note: this is NOT "no conflicts ever existed" -- conflict count is expected to be nonzero
-# before this tool runs.  It asserts the resolution path converges to zero.
-#
-# INPUTS:
-#   db_name        REQUIRED.
-#   nodes          REQUIRED.  JSON list of node names to watch.
-#   timeout_secs   OPTIONAL.  Default 60.  (NOT `timeout` -- reserved Ansible variable name.)
-#   poll_interval  OPTIONAL.  Default 2.
-#
-# RUN EXAMPLE:
-#   ansible-playbook toolbox/wait/wait_for_conflicts_resolved.yml \
-#       -e db_name=Tenants -e timeout_secs=90 -e '{"nodes":["1a","1b","1c"]}'
-##################################################################################################
+# Example: ansible-playbook toolbox/wait/wait_for_conflicts_resolved.yml \
+#              -e db_name=Tenants -e timeout_secs=90 -e '{"nodes":["1a","1b","1c"]}'
 
 - name: Wait until /replication/conflicts is empty on every node
   hosts: localhost

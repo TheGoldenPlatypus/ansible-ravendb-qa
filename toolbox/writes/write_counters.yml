@@ -1,22 +1,9 @@
-##################################################################################################
-# toolbox/writes/write_counters.yml
+# toolbox/writes/write_counters.yml -- increment a named counter on a doc (applies delta, repeat times).
 #
-# Increments a named counter on a doc N times (each call applies `delta`).
-# NOT idempotent -- re-running adds delta*repeat to the counter again.  Use this when a
-# scenario needs to exercise counter increment replication.
+# Inputs:  target, db_name, doc_id (required); counter_name (default "Likes"),
+#          delta (default 1), repeat (default 1).
 #
-# INPUTS:
-#   target         REQUIRED.
-#   db_name        REQUIRED.
-#   doc_id         REQUIRED.  Doc must already exist.
-#   counter_name   OPTIONAL.  Default "Likes".
-#   delta          OPTIONAL.  Default 1.
-#   repeat         OPTIONAL.  Default 1.
-#
-# RUN EXAMPLES:
-#   ansible-playbook toolbox/writes/write_counters.yml -e target=1a -e db_name=Tenants -e doc_id=users/1
-#   ansible-playbook toolbox/writes/write_counters.yml -e target=2a -e db_name=Tenants -e doc_id=users/1 -e counter_name=Likes -e delta=7 -e repeat=3
-##################################################################################################
+# Example: ansible-playbook toolbox/writes/write_counters.yml -e target=1a -e db_name=Tenants -e doc_id=users/1
 
 - name: Increment a named counter on a doc
   hosts: localhost

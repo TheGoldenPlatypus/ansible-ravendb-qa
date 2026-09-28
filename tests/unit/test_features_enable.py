@@ -1,21 +1,4 @@
-"""
-Tests for ravendb_features kind=enable.
-
-What the kind does:  POST /databases/<db>/admin/features then re-fetch the
-                     DatabaseRecord and verify every Add feature is present and
-                     every Remove feature is gone.
-
-Hardening pinned here:
-  - POST + verify path: returns PASS lines on happy path.
-  - POST failure (non-2xx) raises with HTTP status in the message.
-  - Verify failure: if the requested Add feature does not appear in the
-    DatabaseRecord, the kind raises -- no silent success.
-  - Schema flexibility: if the canonical 'DatabaseFeatures' / 'EnabledFeatures'
-    / 'Features' field isn't present but the feature name appears anywhere
-    in the JSON, verification still passes (catches release-to-release
-    schema renames).
-  - Empty add+remove: raises ValueError up front (no useless POST).
-"""
+"""Tests for ravendb_features kind=enable."""
 
 from collections import defaultdict
 
@@ -39,8 +22,7 @@ def _params(**overrides):
 
 
 def _fake_request(post_status=200, record=None, capture_post=None):
-    """Build a request() stand-in that returns POST status + a fake
-    DatabaseRecord on GET.  Optionally records the POST body."""
+    """request() stand-in returning POST status + a fake DatabaseRecord on GET."""
     import json as _json
     record_bytes = _json.dumps(record or {}).encode()
 
@@ -71,8 +53,7 @@ def test_enable_happy_path_with_canonical_field(monkeypatch):
 
 
 def test_enable_verifies_via_anywhere_scan_when_no_canonical_field(monkeypatch):
-    """No 'DatabaseFeatures' key, but the feature name appears in a nested
-    Settings dict.  Verification must still pass via the fallback scan."""
+    """Feature name present only in a nested field -> verification passes via fallback scan."""
     record = {"Settings": {"Raven.Replication.PullReplicationCompositeChangeVectors": "true"}}
     monkeypatch.setattr(feat, "request", _fake_request(record=record))
 

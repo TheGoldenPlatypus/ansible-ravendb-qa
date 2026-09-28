@@ -1,18 +1,9 @@
-##################################################################################################
-# toolbox/diagnostic/diagnostic_doc_count_parity.yml
+# toolbox/diagnostic/diagnostic_doc_count_parity.yml -- report CountOfDocuments per node.
 #
-# Reports CountOfDocuments per node.  Info by default; pass assert_mode=true to fail on drift.
-# Nodes returning non-200 are dropped from the comparison.
+# Inputs:  db_name, nodes (required); assert_mode (optional, default false).
 #
-# INPUTS:
-#   db_name      REQUIRED.
-#   nodes        REQUIRED.
-#   assert_mode  OPTIONAL.  Default false.
-#
-# RUN EXAMPLE:
-#   ansible-playbook toolbox/diagnostic/diagnostic_doc_count_parity.yml \
-#       -e db_name=Tenants -e '{"nodes":["1a","1b","1c"]}'
-##################################################################################################
+# Example: ansible-playbook toolbox/diagnostic/diagnostic_doc_count_parity.yml \
+#              -e db_name=Tenants -e '{"nodes":["1a","1b","1c"]}'
 
 - name: Doc count parity across nodes (info; assert with assert_mode=true)
   hosts: localhost

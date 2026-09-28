@@ -1,22 +1,11 @@
-##################################################################################################
-# toolbox/wait/wait_for_docs_drain.yml
+# toolbox/wait/wait_for_docs_drain.yml -- wait until each node's DatabaseChangeVector is
+# unchanged across two consecutive polls.
 #
-# Waits until each node's DatabaseChangeVector is unchanged across two consecutive polls --
-# per-node "outbound queue settled" signal.  Distinct from wait_for_quiescence (cross-node CV
-# EQUALITY) -- this asserts each node has gone quiet, not that they agree.
+# Inputs:  db_name, nodes (required, JSON list); timeout_secs (optional, default 180);
+#          poll_interval (optional, default 3).
 #
-# Use when you need to be sure the previous workload has flushed before starting a new
-# measurement.
-#
-# INPUTS:
-#   db_name        REQUIRED.
-#   nodes          REQUIRED.  JSON list of node names.
-#   timeout_secs   OPTIONAL.  Default 180.  (NOT `timeout` -- reserved Ansible variable name.)
-#   poll_interval  OPTIONAL.  Default 3 (= stable_for window).
-#
-# RUN EXAMPLE:
-#   ansible-playbook toolbox/wait/wait_for_docs_drain.yml -e db_name=Tenants -e '{"nodes":["1a","1b","1c"]}'
-##################################################################################################
+# Example: ansible-playbook toolbox/wait/wait_for_docs_drain.yml \
+#              -e db_name=Tenants -e '{"nodes":["1a","1b","1c"]}'
 
 - name: Wait until DatabaseChangeVector stops changing on every node
   hosts: localhost

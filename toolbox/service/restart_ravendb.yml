@@ -1,26 +1,10 @@
-##################################################################################################
-# toolbox/service/restart_ravendb.yml
+# toolbox/service/restart_ravendb.yml -- restart the RavenDB systemd service on a node and wait for HTTPS to return.
 #
-# Restarts the RavenDB systemd service on a target node and waits for the HTTPS endpoint
-# to come back.  Useful for testing what happens to replication when one node bounces.
+# Inputs:  target (required; node name); timeout_secs (default 120).
 #
-# Works in both target_modes:
-#   * docker -- systemctl runs inside the container via docker_container_exec from localhost.
-#   * ssh    -- systemctl runs natively on the host (the play targets `target` directly).
-#
-# INPUTS:
-#   target        REQUIRED.  Node name (e.g. 1a).
-#   timeout_secs  OPTIONAL.  Default 120.  Wait budget for the node to come back up.
-#
-# RUN EXAMPLES:
-#   # docker
-#   ansible-playbook toolbox/service/restart_ravendb.yml -e target=1b
-#
-#   # ssh
-#   ansible-playbook -i inventory/ssh_hosts.yml toolbox/service/restart_ravendb.yml -e target=1b
-##################################################################################################
+# Example: ansible-playbook toolbox/service/restart_ravendb.yml -e target=1b
 
-# ===== PLAY 1 -- validate inputs + restart in docker mode (no-op in ssh mode) ===================
+# Play 1: validate inputs and restart in docker mode.
 
 - name: Restart RavenDB on a target node (docker path)
   hosts: localhost
@@ -40,7 +24,7 @@
         command: systemctl restart ravendb
       when: target_mode | default('docker') == 'docker'
 
-# ===== PLAY 2 -- ssh mode: restart natively on the target ========================================
+# Play 2: ssh mode -- restart natively on the target.
 
 - name: (ssh) Restart RavenDB on {{ target }}
   hosts: "{{ target }}"
@@ -56,7 +40,7 @@
       ansible.builtin.shell: systemctl restart ravendb
       changed_when: false
 
-# ===== PLAY 3 -- wait for HTTPS to come back =====================================================
+# Play 3: wait for HTTPS to come back.
 
 - name: Wait for {{ target }} HTTPS
   hosts: localhost

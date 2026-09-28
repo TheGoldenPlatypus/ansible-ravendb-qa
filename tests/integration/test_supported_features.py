@@ -1,13 +1,4 @@
-"""
-Tests for k_supported_features.
-
-What the kind does:  reads DatabaseRecord.SupportedFeatures for one db on one
-                     node and prints the dict.  Used after a rolling upgrade
-                     to confirm the new build's optional features actually
-                     flipped on for the database.
-Returns:             one-line str
-Raises:              RuntimeError on non-200 (db missing or node unreachable).
-"""
+"""Tests for k_supported_features."""
 
 import pytest
 

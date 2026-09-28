@@ -1,8 +1,4 @@
-"""
-Smoke test for the integration harness itself: brings up a single embedded
-node, creates a db, runs k_doc_count against it.  If this passes, the harness
-is wired correctly and multi-node tests can use the same plumbing.
-"""
+"""Smoke test for the integration harness itself."""
 
 import ravendb_diagnostic as diag
 
@@ -18,8 +14,7 @@ def _params(target, db="db1"):
 
 
 def test_single_node_db_is_reachable_via_diagnostic(ravendb_cluster):
-    """Bring up 1 node, create db1, call k_doc_count. Should return a string
-    naming the target and db with a count of 0 (empty db)."""
+    """One node with empty db1 -> k_doc_count returns target/db with 0 docs."""
     info = ravendb_cluster(n_nodes=1, db="db1")
     target = info["nodes"][0]
 

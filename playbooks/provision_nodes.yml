@@ -1,27 +1,19 @@
-##################################################################################################
 # playbooks/provision_nodes.yml
 #
-# Creates one docker container per (cluster_id, node_letter) on a shared docker network.
-# RavenDB is NOT installed here -- this just lays out the empty containers.  Names follow
-# the convention <cluster_id><node_letter>, e.g. 1a, 1b, 1c, 2a, ...
+# Creates one docker container per (cluster_id, node_letter) on a shared docker
+# network. RavenDB is NOT installed here. Names follow <cluster_id><node_letter>,
+# e.g. 1a, 1b, 1c, 2a.
 #
-# INPUTS (all overridable via `-e key=value`; defaults live in inventory/group_vars/all.yml):
-#   clusters_count       how many cluster ids to generate names for          (default: 1)
-#   nodes_per_cluster    how many letters per cluster id (max 26)            (default: 3)
-#   docker_network_name  shared docker network the containers attach to      (default: hubsinknet)
-#   docker_image         image to launch                                     (default: ubuntu2204-ansible)
-#   container_memory     per-container cgroup memory cap                     (default: 2500m)
+# Inputs (override with -e key=value; defaults in inventory/group_vars/all.yml):
+#   clusters_count       how many cluster ids to generate names for
+#   nodes_per_cluster    how many letters per cluster id (max 26)
+#   docker_network_name  shared docker network the containers attach to
+#   docker_image         image to launch
+#   container_memory     per-container memory cap
 #
-# RUN EXAMPLES:
-#   # use all defaults (1 cluster x 3 nodes = 3 containers)
+# Run:
 #   ansible-playbook playbooks/provision_nodes.yml
-#
-#   # 2 clusters x 3 nodes = 6 containers ([1a,1b,1c], [2a,2b,2c])
 #   ansible-playbook playbooks/provision_nodes.yml -e clusters_count=2
-#
-#   # 3 clusters x 5 nodes = 15 containers ([1a,1b,1c,1d,1e]... [3a,3b,3c,3d,3e]), tighter memory cap 
-#   ansible-playbook playbooks/provision_nodes.yml -e clusters_count=3 -e nodes_per_cluster=5 -e container_memory=1500m
-##################################################################################################
 
 - name: Provision docker containers for RavenDB chaos lab
   hosts: localhost
@@ -29,10 +21,7 @@
   gather_facts: false
 
   tasks:
-    # cluster_id_start defaults to 1 -- single-lab runs name containers 1a/1b/.../2a/...
-    # For parallel runs on the same docker host, override -e cluster_id_start=4 (or any
-    # offset) so each parallel run's containers occupy a disjoint cluster_id range and
-    # don't collide globally on the docker daemon.
+    # cluster_id_start (default 1) offsets the starting cluster id.
     - name: Build the list of container names (<cluster_id_start>a, b, c, ...)
       ansible.builtin.set_fact:
         container_names: "{{ raw_names.split() }}"
@@ -71,8 +60,6 @@
         networks:
           - name: "{{ docker_network_name }}"
         networks_cli_compatible: true
-        # community.docker >=4.0 dropped purge_networks; the equivalent is
-        # comparisons.networks=strict (drop any extra networks not listed above).
         comparisons:
           networks: strict
         volumes:
@@ -83,11 +70,6 @@
           - /tmp
       loop: "{{ container_names }}"
 
-    # docker_container with state=started returns as soon as PID 1 (systemd) has been
-    # forked, NOT once systemd-boot has finished.  install_ravendb.yml's first apt task
-    # then races systemd-boot and can SIGKILL the container mid-apt (rc=137,
-    # "container is not running").  Block until systemd reports the system has reached
-    # a stable target before declaring provisioning complete.
     - name: Wait for systemd to finish booting inside each container
       ansible.builtin.command:
         cmd: docker exec {{ item }} systemctl is-system-running --wait
@@ -95,21 +77,10 @@
       register: systemd_ready
       retries: 30
       delay: 2
-      # Acceptable end-states: running, degraded.  "starting" means still booting -> retry.
       until: systemd_ready.stdout | trim in ['running', 'degraded']
       changed_when: false
-      # systemctl returns rc!=0 for 'degraded' which is fine for our use; ignore so the
-      # `until` clause decides.
       failed_when: false
 
-    # Hard verification: every container we asked for must actually be Running.
-    # The systemd-wait task above swallows docker-exec failures via failed_when:false,
-    # so a container that never spawned (image pull error, name collision on a different
-    # network, docker daemon transient) would slip through.  Catch that here.
-    # Retry per-container: at high container counts (e.g. large fan-out topologies) a node
-    # can still be mid-start when first inspected -- retry each until it reports running so a
-    # transient state doesn't fail the whole provision.  failed_when:false lets the assert
-    # below produce the friendly "not running: [...]" message for a genuinely dead container.
     - name: Verify every container is in state=running
       ansible.builtin.shell: |
         docker inspect -f '{% raw %}{{.State.Running}}{% endraw %}' {{ item }} 2>/dev/null || echo "MISSING"

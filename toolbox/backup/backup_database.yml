@@ -1,26 +1,10 @@
-##################################################################################################
-# toolbox/backup/backup_database.yml
+# toolbox/backup/backup_database.yml -- trigger an on-demand Logical or Snapshot backup and wait for completion.
 #
-# Triggers an on-demand Logical or Snapshot backup and waits for completion.  RavenDB has no
-# true ad-hoc backup REST -- this creates a periodic-backup task scheduled far in the future
-# (won't auto-fire), triggers it manually, waits, deletes the task at the end.
+# Inputs:  target, db_name (required); backup_type ("Backup" default, or "Snapshot"),
+#          backup_path (default /backups/<db>-<timestamp>/), timeout_secs (default 300),
+#          poll_interval (default 3).
 #
-# Long-running: a real backup can take minutes.  Ansible buffers module output, so the task
-# looks "hung" while waiting.  Open a second terminal and `tail -F` the printed progress log
-# to watch per-poll status live.
-#
-# INPUTS:
-#   target           REQUIRED.
-#   db_name          REQUIRED.
-#   backup_type      OPTIONAL.  "Backup" (default) or "Snapshot".
-#   backup_path      OPTIONAL.  Default /backups/<db>-<timestamp>/.
-#   timeout_secs     OPTIONAL.  Default 300.
-#   poll_interval    OPTIONAL.  Default 3.
-#
-# RUN EXAMPLES:
-#   ansible-playbook toolbox/backup/backup_database.yml -e target=1a -e db_name=Tenants
-#   ansible-playbook toolbox/backup/backup_database.yml -e target=1a -e db_name=Tenants -e backup_type=Snapshot
-##################################################################################################
+# Example: ansible-playbook toolbox/backup/backup_database.yml -e target=1a -e db_name=Tenants
 
 - name: Trigger an on-demand backup and wait for completion
   hosts: localhost

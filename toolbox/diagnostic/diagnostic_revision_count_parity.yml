@@ -1,25 +1,13 @@
-##################################################################################################
-# toolbox/diagnostic/diagnostic_revision_count_parity.yml
+# toolbox/diagnostic/diagnostic_revision_count_parity.yml -- report per-id revision counts
+# across nodes.
 #
-# For a probe set of doc ids, GETs revision lists on every node and reports per-id counts.
-# Info by default; pass assert_mode=true to fail on count drift.  When expected_count is set,
-# also checks every node reports exactly that count.
+# Inputs:  db_name, nodes (required); provide either ids (optional) or id_prefix + count
+#          (count required when id_prefix is set); expected_count (optional, assert exact count);
+#          page_size (optional, default 1024); assert_mode (optional, default false).
 #
-# INPUTS (provide EITHER ids OR id_prefix+count):
-#   db_name         REQUIRED.
-#   nodes           REQUIRED.
-#   ids             OPTIONAL.
-#   id_prefix       OPTIONAL.
-#   count           OPTIONAL.  Required if id_prefix is set.
-#   expected_count  OPTIONAL.  When set, also asserts the count matches exactly.
-#   page_size       OPTIONAL.  Default 1024.
-#   assert_mode     OPTIONAL.  Default false.
-#
-# RUN EXAMPLE:
-#   ansible-playbook toolbox/diagnostic/diagnostic_revision_count_parity.yml \
-#       -e db_name=Tenants -e id_prefix=users/sink1 -e count=20 \
-#       -e '{"nodes":["1a","1b","1c"]}'
-##################################################################################################
+# Example: ansible-playbook toolbox/diagnostic/diagnostic_revision_count_parity.yml \
+#              -e db_name=Tenants -e id_prefix=users/1 -e count=20 \
+#              -e '{"nodes":["1a","1b","1c"]}'
 
 - name: Per-id revision count parity across nodes
   hosts: localhost

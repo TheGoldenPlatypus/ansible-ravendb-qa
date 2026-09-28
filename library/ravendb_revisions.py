@@ -1,7 +1,8 @@
 #!/usr/bin/python
+"""ravendb_revisions -- Ansible module that configures the revisions policy on a RavenDB database."""
 
 from ansible.module_utils.basic import AnsibleModule
-from ansible.module_utils.ravendb_client import request, resolve_db_admin_route
+from ansible.module_utils.ravendb_client import request
 
 
 def seconds_to_hms(secs):
@@ -15,6 +16,7 @@ def seconds_to_hms(secs):
 
 
 def build_simple_body(minimum_revisions):
+    """Build a revisions config body with only a Default keeping `minimum_revisions`."""
     return {
         "Default": {
             "MinimumRevisionsToKeep": minimum_revisions,
@@ -24,6 +26,7 @@ def build_simple_body(minimum_revisions):
 
 
 def build_per_collection_body(default_keep, default_max_age_secs, collections_config):
+    """Build a revisions config body with a Default plus per-collection overrides."""
     default = {
         "MinimumRevisionsToKeep": default_keep,
         "MinimumRevisionAgeToKeep": seconds_to_hms(default_max_age_secs),
@@ -76,17 +79,9 @@ def main():
     path = "/databases/%s/admin/revisions/config" % p["db_name"]
 
     try:
-        route_target = resolve_db_admin_route(
-            p["target"], p["db_name"], p["ravendb_domain"],
-            p["client_cert"], p["ca_cert"],
-        )
-    except Exception as e:
-        module.fail_json(msg=str(e))
-
-    try:
         status, _ = request(
             "POST",
-            route_target, p["ravendb_domain"], path,
+            p["target"], p["ravendb_domain"], path,
             p["client_cert"], p["ca_cert"],
             body=body,
         )
@@ -94,14 +89,13 @@ def main():
         module.fail_json(msg=str(e))
 
     if status not in (200, 201, 204):
-        module.fail_json(msg="unexpected HTTP status %d (target=%s, routed via %s)"
-                             % (status, p["target"], route_target))
+        module.fail_json(msg="unexpected HTTP status %d (target=%s)"
+                             % (status, p["target"]))
 
-    routed_note = "" if route_target == p["target"] else " (sharded -- routed via %s)" % route_target
     module.exit_json(
         changed=True,
-        msg="REVISIONS configured on %s/%s -- %s%s" % (
-            p["target"], p["db_name"], summary, routed_note),
+        msg="REVISIONS configured on %s/%s -- %s" % (
+            p["target"], p["db_name"], summary),
     )
 
 

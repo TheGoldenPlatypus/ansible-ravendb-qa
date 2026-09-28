@@ -1,20 +1,10 @@
-##################################################################################################
-# toolbox/writes/delete_docs.yml
+# toolbox/writes/delete_docs.yml -- delete docs on a target node by explicit ids or by id prefix + count.
 #
-# Deletes docs on a target node either by an explicit list of ids or by an id prefix + count.
-# Use this when a scenario needs to exercise delete-propagation paths.
+# Inputs (provide EITHER ids OR id_prefix+count):  target, db_name (required);
+#          ids (JSON list of doc ids), id_prefix (builds ids <id_prefix>/0..count-1),
+#          count (required when id_prefix is set).
 #
-# INPUTS (provide EITHER ids OR id_prefix+count):
-#   target       REQUIRED.
-#   db_name      REQUIRED.
-#   ids          OPTIONAL.  Explicit list of doc ids to delete (JSON list on the CLI).
-#   id_prefix    OPTIONAL.  Builds ids <id_prefix>/0..count-1.
-#   count        OPTIONAL.  Required iff id_prefix is set.
-#
-# RUN EXAMPLES:
-#   ansible-playbook toolbox/writes/delete_docs.yml -e target=1a -e db_name=Tenants -e id_prefix=micro/doc -e count=50
-#   ansible-playbook toolbox/writes/delete_docs.yml -e target=1a -e db_name=Tenants -e '{"ids":["users/1","users/42"]}'
-##################################################################################################
+# Example: ansible-playbook toolbox/writes/delete_docs.yml -e target=1a -e db_name=Tenants -e id_prefix=micro/doc -e count=50
 
 - name: Delete docs on a target node
   hosts: localhost

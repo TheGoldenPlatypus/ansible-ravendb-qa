@@ -1,32 +1,26 @@
 #!/usr/bin/env bash
-###################################################################################################
 # scripts/build_ravendb_pr.sh
 #
-# Build a RavenDB .deb (Studio included) from a ravendb/ravendb PR.
-# Outputs <repo_root>/builds/raven-pr<N>.deb that you hand to install_ravendb.yml's
-# `custom_build` param.
+# Build a RavenDB .deb (Studio included) from a ravendb/ravendb PR. Outputs
+# <repo_root>/builds/raven-pr<N>.deb for install_ravendb.yml's custom_build param.
 #
-# USAGE:
+# Usage:
 #   scripts/build_ravendb_pr.sh <pr-number>
 #
-# EXAMPLE:
+# Example:
 #   scripts/build_ravendb_pr.sh 22875
 #   ansible-playbook playbooks/install_ravendb.yml -K \
 #       -e custom_build=$PWD/builds/raven-pr22875.deb --skip-tags download
 #
-# WHAT IT DOES:
-#   Stage 1 -- compile source -> tarball  (needs pwsh + .NET SDK + node on host)
-#              ./build.sh -LinuxX64          (Studio compiled by default)
-#   Stage 2 -- wrap tarball -> .deb         (fully containerized; uses RavenDB's own
-#              build-deb.sh)                  ubuntu_native.Dockerfile + build-deb.sh)
+# What it does:
+#   Stage 1 -- compile source to a tarball (needs pwsh, .NET SDK, node).
+#   Stage 2 -- wrap the tarball into a .deb (containerized).
 #
-# PREREQUISITES (the script checks these before doing anything):
-#   git, docker (daemon up), pwsh, dotnet, node, npm
-###################################################################################################
+# Prerequisites: git, docker (daemon up), pwsh, dotnet, node, npm
 
 set -euo pipefail
 
-# ---------- helpers -----------------------------------------------------------------------------
+# helpers
 
 red()    { printf '\033[31m%s\033[0m\n' "$*"; }
 green()  { printf '\033[32m%s\033[0m\n' "$*"; }
@@ -71,7 +65,7 @@ check_prereqs() {
   echo
 }
 
-# ---------- main --------------------------------------------------------------------------------
+# main
 
 PR="${1:-}"
 if [ -z "$PR" ]; then
@@ -90,14 +84,12 @@ FINAL="${BUILDS_DIR}/raven-pr${PR}.deb"
 
 mkdir -p "$BUILDS_DIR"
 
-# ---- clone / fetch / checkout PR ---------------------------------------------------------------
+# clone / fetch / checkout PR
 if [ ! -d "$WORKDIR/.git" ]; then
   echo "==> cloning ravendb/ravendb (first run, takes a minute)"
   git clone https://github.com/ravendb/ravendb.git "$WORKDIR"
 fi
 cd "$WORKDIR"
-# Fetch into FETCH_HEAD then -B the local branch -- avoids "refusing to fetch into current branch"
-# when a previous run left pr-<N> checked out.
 git fetch origin "refs/pull/${PR}/head"
 git checkout -B "pr-${PR}" FETCH_HEAD
 git submodule update --init --recursive 2>/dev/null || true
@@ -105,7 +97,7 @@ HEAD_SHA=$(git rev-parse --short HEAD)
 green "==> PR #${PR} checked out at $HEAD_SHA"
 echo
 
-# ---- post-clone prereq check: required .NET SDK from global.json -------------------------------
+# post-clone prereq check: required .NET SDK from global.json
 if [ -f "global.json" ]; then
   REQUIRED_SDK=$(grep -oP '"version"\s*:\s*"\K[0-9.]+' global.json | head -1 || true)
   if [ -n "$REQUIRED_SDK" ]; then
@@ -126,7 +118,7 @@ if [ -f "global.json" ]; then
 fi
 echo
 
-# ---- Stage 1: source build (tarball, Studio included) ------------------------------------------
+# Stage 1: source build (tarball, Studio included)
 yellow "==> Stage 1 -- compiling RavenDB + Studio from source (this is the slow part)"
 ./build.sh -LinuxX64
 
@@ -137,19 +129,17 @@ if [ -z "$TARBALL" ]; then
   exit 3
 fi
 
-FILENAME=$(basename "$TARBALL")                          # RavenDB-<ver>-linux-x64.tar.bz2
+FILENAME=$(basename "$TARBALL")
 RAVENDB_VERSION="${FILENAME#RavenDB-}"
 RAVENDB_VERSION="${RAVENDB_VERSION%-linux-x64.tar.bz2}"
 green "==> Stage 1 produced: $TARBALL  (version: $RAVENDB_VERSION)"
 echo
 
-# Place the tarball where the deb-builder expects it (note the lowercase 'ravendb-' filename).
+# Place the tarball where the deb-builder expects it.
 mkdir -p "$TEMP_DIR" "$OUTPUT_DIR"
 EXPECTED="$TEMP_DIR/ravendb-${RAVENDB_VERSION}-linux-x64.tar.bz2"
 cp -v "$TARBALL" "$EXPECTED"
 
-# Workaround: some branches' builds don't emit RavenDB/runtime.txt; the deb wrapper needs it.
-# Inject it from Raven.Server.runtimeconfig.json's framework.version.
 if ! tar tjf "$EXPECTED" | grep -q '^RavenDB/runtime.txt$'; then
   yellow "==> RavenDB/runtime.txt missing from tarball; injecting from runtimeconfig"
   PATCH_WORK=$(mktemp -d)
@@ -167,11 +157,10 @@ if ! tar tjf "$EXPECTED" | grep -q '^RavenDB/runtime.txt$'; then
 fi
 echo
 
-# ---- Stage 2: deb wrap (containerized, uses RavenDB's own build-deb.sh) ------------------------
+# Stage 2: deb wrap (containerized)
 yellow "==> Stage 2 -- wrapping into .deb via ubuntu_native.Dockerfile"
 cd "$WORKDIR/scripts/linux/pkg/deb"
 
-# These setters mirror what build-deb_ubuntu-jammy_amd64.ps1 does in PowerShell.
 source ./set-ubuntu-jammy.sh                     # DISTRO_NAME=ubuntu, DISTRO_VERSION=22.04, DISTRO_VERSION_NAME=jammy
 source ./set-raven-platform-amd64.sh             # RAVEN_PLATFORM=linux-x64, DOCKER_BUILDPLATFORM=linux/amd64, DEB_ARCHITECTURE=amd64
 
@@ -179,7 +168,7 @@ export RAVENDB_VERSION TEMP_DIR OUTPUT_DIR
 
 ./build-deb.sh
 
-# ---- copy out -----------------------------------------------------------------------------------
+# copy out
 DEB=$(find "$OUTPUT_DIR/${DISTRO_VERSION}" -maxdepth 1 -name "ravendb_*_amd64.deb" 2>/dev/null | head -1 || true)
 if [ -z "$DEB" ]; then
   red "ERROR: Stage 2 produced no .deb under $OUTPUT_DIR/${DISTRO_VERSION}/"

@@ -1,20 +1,11 @@
-##################################################################################################
-# toolbox/diagnostic/diagnostic_orphan_revisions.yml
+# toolbox/diagnostic/diagnostic_orphan_revisions.yml -- run the adopt-orphaned-revisions
+# operation on every node and report AdoptedCount per node.
 #
-# Triggers RavenDB's "adopt orphaned revisions" operation on every node and reports the
-# AdoptedCount per node.  AdoptedCount > 0 means there were orphans -- a real defect.
-# Info by default; pass assert_mode=true to fail when any node reports a non-zero count.
+# Inputs:  db_name, nodes (required); budget_secs (optional, default 60, per-node budget);
+#          assert_mode (optional, default false).
 #
-# INPUTS:
-#   db_name        REQUIRED.
-#   nodes          REQUIRED.
-#   budget_secs    OPTIONAL.  Default 60.  Per-node budget for the adopt operation.
-#   assert_mode    OPTIONAL.  Default false.
-#
-# RUN EXAMPLE:
-#   ansible-playbook toolbox/diagnostic/diagnostic_orphan_revisions.yml \
-#       -e db_name=db1 -e '{"nodes":["1a","1b","1c"]}'
-##################################################################################################
+# Example: ansible-playbook toolbox/diagnostic/diagnostic_orphan_revisions.yml \
+#              -e db_name=db1 -e '{"nodes":["1a","1b","1c"]}'
 
 - name: Adopt orphan revisions on every node and report counts
   hosts: localhost

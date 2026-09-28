@@ -1,20 +1,8 @@
-##################################################################################################
-# toolbox/writes/write_docs_freeform.yml
+# toolbox/writes/write_docs_freeform.yml -- write N freeform docs to a target node (random uuid id, "@collection": null).
 #
-# Writes N "freeform" docs to a target node: random uuid id, "@collection": null in metadata.
-# Use this for chaos scenarios that need writes with no predictable shape -- some replication
-# race bugs only trigger when ids don't follow a known prefix.
+# Inputs:  target, db_name, count (required).
 #
-# NOT idempotent -- each call writes new docs with fresh uuids.
-#
-# INPUTS:
-#   target   REQUIRED.
-#   db_name  REQUIRED.
-#   count    REQUIRED.  Typically small (1-3).
-#
-# RUN EXAMPLE:
-#   ansible-playbook toolbox/writes/write_docs_freeform.yml -e target=2a -e db_name=Tenants -e count=1
-##################################################################################################
+# Example: ansible-playbook toolbox/writes/write_docs_freeform.yml -e target=2a -e db_name=Tenants -e count=1
 
 - name: Write N freeform docs (random uuid ids, null collection)
   hosts: localhost

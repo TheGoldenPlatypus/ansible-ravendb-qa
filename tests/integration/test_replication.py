@@ -1,11 +1,4 @@
-"""
-Tests for k_replication.
-
-What the kind does:  lists active incoming + outgoing replication connections
-                     on one node.
-Returns:             list[str] on 200.  Raises RuntimeError on non-200
-                     (db missing or node unreachable).
-"""
+"""Tests for k_replication."""
 
 import time
 
@@ -20,12 +13,9 @@ from raven_lab import (
     write_doc,
 )
 
-# ---- the canonical happy path ----------------------------------------------
 
 def test_outgoing_section_shows_destination_after_replication_is_wired(ravendb_cluster):
-    """Set up external_replication from n1 to n2.  Write one doc on n1 (so the
-    OUTGOING connection actually opens).  k_replication on n1 must list n2's
-    URL in the OUTGOING section."""
+    """Repl wired n1 -> n2 -> k_replication on n1 lists n2's URL under OUTGOING."""
     info = ravendb_cluster(n_nodes=2, cluster=False)
     n1, n2 = info["nodes"]
     n2_url = info["urls"][1]
@@ -45,8 +35,7 @@ def test_outgoing_section_shows_destination_after_replication_is_wired(ravendb_c
 
 
 def test_incoming_section_on_destination_shows_source(ravendb_cluster):
-    """Mirror of the canonical test: from the destination's side, INCOMING
-    must list the source.  Same setup, query the OTHER node."""
+    """Repl wired n1 -> n2 -> k_replication on n2 lists the source under INCOMING."""
     info = ravendb_cluster(n_nodes=2, cluster=False)
     n1, n2 = info["nodes"]
 
@@ -64,15 +53,14 @@ def test_incoming_section_on_destination_shows_source(ravendb_cluster):
 
 
 def test_teardown_brings_outgoing_back_to_zero(ravendb_cluster):
-    """Proves the kind reads live state, not cached.  Wire repl, observe
-    OUTGOING (1), delete the task, observe OUTGOING (0) within a settle window."""
+    """Deleting the repl task -> OUTGOING drops back to 0."""
     info = ravendb_cluster(n_nodes=2, cluster=False)
     n1, n2 = info["nodes"]
     n2_url = info["urls"][1]
 
     task_id = setup_external_replication(src_node=n1, dst_node=n2)
     write_doc(n1, "users/1", {"name": "trigger"})
-    _wait_for(n1, n2_url)              # confirm it came up first
+    _wait_for(n1, n2_url)
 
     delete_replication_task(n1, task_id)
 
@@ -87,7 +75,7 @@ def test_teardown_brings_outgoing_back_to_zero(ravendb_cluster):
 
 
 def test_zero_connections_when_no_tasks_configured(ravendb_cluster):
-    """fresh db with no replication tasks reports 0/0."""
+    """Fresh db with no replication tasks -> INCOMING (0), OUTGOING (0)."""
     info = ravendb_cluster(n_nodes=1)
     node = info["nodes"][0]
 
@@ -103,7 +91,7 @@ def test_zero_connections_when_no_tasks_configured(ravendb_cluster):
 
 
 def test_raises_when_db_does_not_exist(ravendb_cluster):
-    """Fail loud on missing DB instead of silently returning a soft string."""
+    """Missing db -> k_replication raises RuntimeError."""
     info = ravendb_cluster(n_nodes=1)
     node = info["nodes"][0]
 
@@ -115,9 +103,7 @@ def test_raises_when_db_does_not_exist(ravendb_cluster):
 
 
 def _wait_for(node, substring, timeout=10):
-    """Poll k_replication(node) until any line contains `substring`.  Returns
-    the last set of lines either way -- if the wait times out, the caller's
-    assertion fails with the real output instead of a useless TimeoutError."""
+    """Poll k_replication(node) until a line contains `substring`. Returns the last lines."""
     deadline = time.monotonic() + timeout
     lines = []
     while time.monotonic() < deadline:

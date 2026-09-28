@@ -1,31 +1,11 @@
-##################################################################################################
-# toolbox/wait/wait_for_healthy.yml
+# toolbox/wait/wait_for_healthy.yml -- wait for a cluster to report healthy.
 #
-# Waits for a cluster to report healthy via the ravendb.ravendb.healthcheck module.
-# Use this as the post-chaos verification step in any scenario: after the chaos action
-# is undone, call this to confirm the cluster genuinely recovered (not just "iptables -D
-# returned 0").
+# Inputs:  cluster_leader (required, node name e.g. 1a); checks (required, comma-separated:
+#          node_alive, cluster_connectivity); max_wait (optional, default 60, total wait budget);
+#          db_retry_interval (optional, default 3, seconds between db-level retries).
 #
-# Available checks (pass as a comma-separated list via -e checks=...):
-#   node_alive            -- the entry-point node responds
-#   cluster_connectivity  -- cluster members can reach each other
-#
-# INPUTS:
-#   cluster_leader     REQUIRED.  Container name of a healthy node (e.g. 1a).
-#   checks             REQUIRED.  Comma-separated check names.
-#   max_wait           OPTIONAL.  Default 60.  Total wait budget per call.
-#   db_retry_interval  OPTIONAL.  Default 3.  Seconds between db-level retries.
-#
-# RUN EXAMPLES:
-#   # quick recovery check after restoring a link
-#   ansible-playbook toolbox/wait/wait_for_healthy.yml \
-#       -e cluster_leader=1a -e checks=node_alive,cluster_connectivity
-#
-#   # full cluster verification (use at the end of a chaos scenario)
-#   ansible-playbook toolbox/wait/wait_for_healthy.yml \
-#       -e cluster_leader=1a \
-#       -e checks=node_alive,cluster_connectivity
-##################################################################################################
+# Example: ansible-playbook toolbox/wait/wait_for_healthy.yml \
+#              -e cluster_leader=1a -e checks=node_alive,cluster_connectivity
 
 - ansible.builtin.import_playbook: ../_internal/ensure_ravendb_venv.yml
 

@@ -1,23 +1,8 @@
-##################################################################################################
-# toolbox/workloads/assert_workload_alive.yml
+# toolbox/workloads/assert_workload_alive.yml -- assert a background workload is still running (pidfile exists and kill -0 succeeds).
 #
-# Asserts a background workload is still running -- pidfile exists AND `kill -0 <pid>` succeeds.
-# Use just BEFORE stop_workload to catch workers that died silently during a scenario phase
-# (curl crashed, OOM-killed, bash quirk, etc.).  Without this check, stop_workload silently
-# accepts a missing pidfile as "already exited" and the scenario passes with degraded load.
+# Inputs:  pidfile (required; absolute path to the workload's pidfile).
 #
-# Three failure modes detected:
-#   1. Pidfile missing entirely (worker exited or was killed externally)
-#   2. Pidfile present but the recorded PID is gone (worker crashed without removing pidfile)
-#   3. Pidfile unreadable / empty
-#
-# INPUTS:
-#   pidfile   REQUIRED.  Absolute path to the workload's pidfile.
-#
-# RUN EXAMPLE:
-#   ansible-playbook toolbox/workloads/assert_workload_alive.yml \
-#       -e pidfile=/tmp/w1-1a-db1-w1.pid
-##################################################################################################
+# Example: ansible-playbook toolbox/workloads/assert_workload_alive.yml -e pidfile=/tmp/w1-1a-db1-w1.pid
 
 - name: Assert a background workload is still alive (pidfile + kill -0)
   hosts: localhost
@@ -42,9 +27,6 @@
       register: probe
       changed_when: false
 
-    # On NO_PIDFILE / EMPTY_PIDFILE / DEAD: dump the worker's debug log so we can
-    # see WHY it died (signal received, last op, last HTTP code, etc).  The .sh
-    # writes /tmp/wN-<target>-<db>[-w<id>].debug.log alongside its pidfile.
     - name: Dump worker debug log on failure (if present)
       ansible.builtin.shell: |
         log="{{ pidfile | regex_replace('\\.pid$', '.debug.log') }}"

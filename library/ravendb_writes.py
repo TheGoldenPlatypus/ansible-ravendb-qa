@@ -1,4 +1,5 @@
 #!/usr/bin/python
+"""ravendb_writes -- Ansible module that writes documents and related data into a RavenDB database."""
 
 import datetime
 import json
@@ -7,22 +8,12 @@ import uuid
 from urllib.parse import quote
 
 from ansible.module_utils.basic import AnsibleModule
-from ansible.module_utils.ravendb_client import request, resolve_db_admin_route
+from ansible.module_utils.ravendb_client import request
 
 
 def resolve_write_target(p):
-    """For sharded databases, doc PUTs to a non-orchestrator member return
-    HTTP 410 DatabaseNotRelevantException -- same routing requirement as
-    admin/<db>/* calls.  Resolve once at the kind entry point and reuse the
-    routed target for the entire write loop; for non-sharded databases this
-    returns p['target'] unchanged.
-
-    Returns the resolved target node name (string).  Raises RuntimeError on
-    transport failure / non-200 /admin/databases lookup."""
-    return resolve_db_admin_route(
-        p["target"], p["db_name"], p["ravendb_domain"],
-        p["client_cert"], p["ca_cert"],
-    )
+    """Return the node to send writes to."""
+    return p["target"]
 
 
 _TRANSIENT_HTTP_STATUSES = frozenset([500, 502, 503, 504])
@@ -31,13 +22,7 @@ _HTTP_RETRY_BACKOFF_SECS = (0.2, 0.5, 1.0)
 
 
 def _format_failure(label, status, body):
-    """Format a per-write failure entry with the server's exception message
-    (when the body is RavenDB's JSON error envelope) or a truncated raw
-    snippet (when it isn't).  Without this every '41/2000 PUTs failed'
-    message was just a list of HTTP codes -- the actual server diagnostic
-    (e.g. 'transaction merger queue full', 'license expired') ended up in
-    the void.  Now the failure surface carries enough text to start
-    debugging without re-running the burst with a packet capture."""
+    """Format a per-write failure as `label -> HTTP <status>: <server message>`."""
     snippet = ""
     if body:
         try:
@@ -58,11 +43,7 @@ def _format_failure(label, status, body):
 
 
 def put_idempotent(p, target, path, body):
-    """PUT with a small bounded retry on transient server-overload statuses.
-
-    Returns the final HTTP status (after retries) and the response body --
-    same shape as request().  Callers route on the status code as usual; if
-    the server stayed in 5xx through all retries, the status surfaces."""
+    """PUT with a bounded retry on transient server-overload statuses; return (status, body)."""
     status = None
     resp = None
     for attempt in range(_HTTP_RETRY_MAX + 1):
@@ -76,6 +57,7 @@ def put_idempotent(p, target, path, body):
 
 
 def k_docs(p):
+    """Write `count` documents with sequential ids under `id_prefix`."""
     target = resolve_write_target(p)
     db = p["db_name"]
     prefix = p["id_prefix"] or "micro/doc"
@@ -93,12 +75,8 @@ def k_docs(p):
         doc_id = "%s/%d" % (prefix, n)
         path = "/databases/%s/docs?id=%s" % (db, quote(doc_id))
         body = {"@metadata": {"@collection": "MicroDocs"}}
-        # body_tag = mark each write with its origin so concurrent writers on the same
-        # docId from different nodes produce DISTINCT content
         if body_tag:
             body["tag"] = body_tag
-        # phase = harness-side cohort marker (e.g. 'pre_cv_toggle' / 'post_cv_toggle').
-        # Lets verification distinguish docs written before vs after a flag flip.
         if phase:
             body["Phase"] = phase
         status, resp = put_idempotent(p, target, path, body)
@@ -115,6 +93,7 @@ def k_docs(p):
 
 
 def k_docs_freeform(p):
+    """Write `count` documents with random uuid ids and no collection."""
     target = resolve_write_target(p)
     db = p["db_name"]
     count = p["count"]
@@ -147,6 +126,7 @@ def k_docs_freeform(p):
 
 
 def k_docs_revisions(p):
+    """Write `count` documents, PUTting each `revs_per_doc` times to build up revisions."""
     target = resolve_write_target(p)
     db = p["db_name"]
     count = p["count"]
@@ -173,11 +153,6 @@ def k_docs_revisions(p):
             }
             if phase:
                 body["Phase"] = phase
-            # Idempotent PUT with bounded retry on transient server overload
-            # (500/502/503/504).  RavenDB's transaction merger queues can
-            # briefly reject during a 50k-PUT sustained seed; the same write
-            # succeeds a few hundred ms later.  Real 4xx / non-transient 5xx
-            # surface unchanged via the failures list.
             status, resp = put_idempotent(p, target, path, body)
             if status not in (200, 201):
                 failures.append(_format_failure(
@@ -193,6 +168,7 @@ def k_docs_revisions(p):
 
 
 def k_docs_interleaved(p):
+    """Write `count` documents round-robin across `prefixes`."""
     target = resolve_write_target(p)
     db = p["db_name"]
     count = p["count"]
@@ -226,6 +202,7 @@ def k_docs_interleaved(p):
 
 
 def k_attachments(p):
+    """Write `count` attachments, one per sequential document id."""
     target = resolve_write_target(p)
     db = p["db_name"]
     count = p["count"]
@@ -258,6 +235,7 @@ def k_attachments(p):
 
 
 def k_counters(p):
+    """Increment a counter on `doc_id` `repeat` times by `delta` each."""
     target = resolve_write_target(p)
     db = p["db_name"]
     doc_id = p["doc_id"]
@@ -299,6 +277,7 @@ def k_counters(p):
 
 
 def k_timeseries(p):
+    """Append time-series entries to `doc_id`, or delete a range when `delete_from`/`delete_to` are set."""
     target = resolve_write_target(p)
     db = p["db_name"]
     doc_id = p["doc_id"]
@@ -363,6 +342,7 @@ def k_timeseries(p):
 
 
 def k_delete(p):
+    """Delete documents given by `ids` or by `id_prefix` + `count`."""
     target = resolve_write_target(p)
     db = p["db_name"]
 
@@ -399,6 +379,7 @@ def k_delete(p):
 
 
 def k_restore_revision(p):
+    """Fetch the revision at `revision_cv` and PUT it back as the live `doc_id`."""
     target = resolve_write_target(p)
     db = p["db_name"]
     doc_id = p["doc_id"]
@@ -460,11 +441,7 @@ def main():
         id_prefix=dict(default=None),
         prefixes=dict(type="list", elements="str", default=None),
         body_tag=dict(default=None),
-        # Optional cohort marker.  When set, every doc body created by k_docs /
-        # k_docs_freeform / k_docs_revisions / k_docs_interleaved includes a
-        # top-level "Phase": <value> field.  Used by scenarios that toggle
-        # behavior mid-run (e.g. enabling a feature flag) to distinguish docs
-        # written before vs after the toggle for downstream verification.
+        # optional cohort marker added as a top-level "Phase" field on each doc
         phase=dict(default=None),
         # docs_revisions
         revs_per_doc=dict(type="int", default=1),

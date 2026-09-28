@@ -1,13 +1,4 @@
-"""
-Tests for k_doc_count_parity.
-
-What the kind does:  asserts every reachable node reports the same
-                     CountOfDocuments.  Catches "this one node lost docs".
-Returns:             list[str] (header + per-node lines + PASS/FAIL)
-Raises:              ValueError if no probed node has the database
-                     (covers the all-unreachable case via classify_nodes).
-                     DiagnosticViolation in assert_mode when counts diverge.
-"""
+"""Tests for k_doc_count_parity."""
 
 import pytest
 
@@ -82,7 +73,7 @@ def test_assert_mode_raises_on_divergence(ravendb_cluster):
 
 
 def test_all_nodes_unreachable_raises(ravendb_cluster):
-    """No node responds to /stats -> classify_nodes finds no DB -> ValueError."""
+    """No node has the database -> ValueError."""
     info = ravendb_cluster(n_nodes=1)   # real server so the fixture cleans up
 
     import ravendb_client

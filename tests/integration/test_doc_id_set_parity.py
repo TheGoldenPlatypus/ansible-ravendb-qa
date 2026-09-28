@@ -1,17 +1,4 @@
-"""
-Tests for k_doc_id_set_parity.
-
-What the kind does:  for each probe doc id, GETs it on every node.  PASSes if
-                     every id is uniformly present (all 200) or uniformly
-                     absent (all non-200).  Has a built-in retry/settle loop
-                     for transient splits.
-Returns:             list[str]
-Raises:              ValueError if neither `ids` nor (`id_prefix` + `count`)
-                     is given.
-                     DiagnosticViolation in assert_mode on a split that
-                     persists past retries.
-                     RuntimeError if any node is unreachable.
-"""
+"""Tests for k_doc_id_set_parity."""
 
 import pytest
 
@@ -39,8 +26,7 @@ def test_passes_when_all_ids_present_on_every_node(ravendb_cluster):
 
 
 def test_passes_when_all_ids_absent_on_every_node(ravendb_cluster):
-    """If we probe ids that exist on no node, the kind should still PASS:
-    'uniformly absent' is a valid form of agreement."""
+    """Ids absent on every node -> PASS (uniformly absent)."""
     info = ravendb_cluster(n_nodes=2, cluster=False)
     n1, n2 = info["nodes"]
 
@@ -59,10 +45,10 @@ def test_split_fails_when_id_present_on_one_node_only(ravendb_cluster):
     info = ravendb_cluster(n_nodes=2, cluster=False)
     n1, n2 = info["nodes"]
 
-    write_doc(n1, "users/0", {"name": "only-on-n1"})    # n2 doesn't have it
+    write_doc(n1, "users/0", {"name": "only-on-n1"})
 
     lines = diag.k_doc_id_set_parity(
-        params(nodes=[n1, n2], ids=["users/0"]))         # info mode
+        params(nodes=[n1, n2], ids=["users/0"]))
     text = "\n".join(lines)
 
     print(f"\n    expected: contains 'FAIL  doc-id-set split' and lists users/0")
@@ -87,10 +73,8 @@ def test_assert_mode_raises_on_persisted_split(ravendb_cluster):
 
 
 def test_unreachable_node_raises_loud(ravendb_cluster):
-    """If ANY node can't be reached, the kind raises -- not silently treats
-    'no response' as 'doc absent'."""
-    info = ravendb_cluster(n_nodes=1)   # spin a real server so the fixture
-                                         # cleans up TARGET_URL_OVERRIDES
+    """Any unreachable node -> RuntimeError."""
+    info = ravendb_cluster(n_nodes=1)
 
     import ravendb_client
     ravendb_client.TARGET_URL_OVERRIDES.clear()
@@ -105,8 +89,7 @@ def test_unreachable_node_raises_loud(ravendb_cluster):
 
 
 def test_missing_ids_and_prefix_raises(ravendb_cluster):
-    """Calling without `ids` and without (`id_prefix` + `count`) -> ValueError
-    from expand_id_set."""
+    """No `ids` and no (`id_prefix` + `count`) -> ValueError."""
     info = ravendb_cluster(n_nodes=1)
     node = info["nodes"][0]
 

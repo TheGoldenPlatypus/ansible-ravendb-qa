@@ -1,40 +1,10 @@
-##################################################################################################
-# toolbox/db/configure_revisions.yml
+# toolbox/db/configure_revisions.yml -- configure document revisions on a DB (simple or per-collection).
 #
-# Configures document revisions on a DB.  Two modes:
+# Inputs:  target, db_name (required); minimum_revisions (simple mode, default 100),
+#          collections_config (per-collection mode, dict { CollectionName: { keep:N, max_age_secs:S } }),
+#          default_keep (default 25), default_max_age_secs (default 21600).
 #
-#   1. SIMPLE -- pass `minimum_revisions` to set Default.MinimumRevisionsToKeep only.
-#
-#   2. PER-COLLECTION -- pass `collections_config` (dict) to set distinct keep + age limits per
-#      collection.  Each entry can have `keep` (MinimumRevisionsToKeep, int) and
-#      `max_age_secs` (MinimumRevisionAgeToKeep, seconds; encoded as "hh:mm:ss" for the API).
-#      `default_keep` + `default_max_age_secs` configure the Default config used for any
-#      collection not in the dict.
-#
-# Implementation: one custom module (library/ravendb_revisions.py) does the JSON-build + HTTPS
-# POST in Python.  This playbook is a thin wrapper that just forwards inputs.  Pattern for other
-# tools we want to de-noise.
-#
-# INPUTS:
-#   target                 REQUIRED.  Container/host to talk to.
-#   db_name                REQUIRED.  Database name.
-#   minimum_revisions      OPTIONAL.  Simple mode -- Default.MinimumRevisionsToKeep.  Default 100.
-#   collections_config     OPTIONAL.  Per-collection mode -- dict: { CollectionName: { keep:N,
-#                                     max_age_secs:S } }.  When present, Default config is built
-#                                     from default_keep + default_max_age_secs.
-#   default_keep           OPTIONAL.  Used in per-collection mode.  Default 25.
-#   default_max_age_secs   OPTIONAL.  Used in per-collection mode.  Default 21600 (6 hours).
-#
-# RUN EXAMPLES:
-#   # simple
-#   ansible-playbook toolbox/db/configure_revisions.yml -K -e target=1a -e db_name=Tenants
-#
-#   # per-collection
-#   ansible-playbook toolbox/db/configure_revisions.yml -K -e target=1a -e db_name=db1 \
-#       -e '{"collections_config":{"Users":{"keep":10,"max_age_secs":1800},
-#                           "Orders":{"keep":50,"max_age_secs":7200},
-#                           "Internal":{"keep":25,"max_age_secs":21600}}}'
-##################################################################################################
+# Example: ansible-playbook toolbox/db/configure_revisions.yml -K -e target=1a -e db_name=Tenants
 
 - name: Configure revisions on a DB
   hosts: localhost

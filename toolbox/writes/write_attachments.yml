@@ -1,21 +1,9 @@
-##################################################################################################
-# toolbox/writes/write_attachments.yml
+# toolbox/writes/write_attachments.yml -- PUT N attachments onto existing docs (doc id <doc_id_prefix>/<n>, name <attachment_name>/<n>).
 #
-# PUTs N attachments onto existing docs.  Doc id pattern: <doc_id_prefix>/<n>.  Attachment name
-# pattern: <attachment_name>/<n>.  Each attachment body is a short text payload (configurable).
-# The parent doc must already exist -- run write_docs.yml first if needed.
+# Inputs:  target, db_name, count (required); doc_id_prefix (default "micro/doc"),
+#          attachment_name (default "data"), payload (default "blob-<n>").
 #
-# INPUTS:
-#   target            REQUIRED.
-#   db_name           REQUIRED.
-#   count             REQUIRED.
-#   doc_id_prefix     OPTIONAL.  Default "micro/doc".
-#   attachment_name   OPTIONAL.  Default "data".
-#   payload           OPTIONAL.  Default "blob-<n>".
-#
-# RUN EXAMPLE:
-#   ansible-playbook toolbox/writes/write_attachments.yml -e target=1a -e db_name=Tenants -e count=10
-##################################################################################################
+# Example: ansible-playbook toolbox/writes/write_attachments.yml -e target=1a -e db_name=Tenants -e count=10
 
 - name: PUT N attachments on existing docs
   hosts: localhost

@@ -1,18 +1,8 @@
 """
-Tests for ravendb_writes input-validation and any-failure-raises.
+Tests for ravendb_writes: each write kind rejects empty/no-op input and
+raises when any individual write returns a non-2xx status.
 
-What the module does:  PUTs / POSTs / DELETEs against /databases/<db>/...
-                       endpoints to seed test data (docs, attachments, counters,
-                       timeseries) or remove it.
-Hardening focus:       every write kind must (a) refuse to claim success on
-                       a 0-count / empty-ids no-op (would be a vacuous PASS in
-                       scenarios that build the input list dynamically), and
-                       (b) refuse to claim success if any individual write
-                       returned a non-2xx HTTP status (would silently lose
-                       data with "WROTE N/M docs" still saying changed=true).
-
-These are unit tests: ravendb_writes.request is monkeypatched to return
-canned HTTP statuses, so the tests don't touch a real RavenDB.
+ravendb_writes.request is monkeypatched with canned statuses -- no real RavenDB.
 """
 
 from collections import defaultdict
@@ -23,8 +13,7 @@ import ravendb_writes as writes
 
 
 def params(**kwargs):
-    """Local params helper -- unit tests don't have access to tests/integration's
-    raven_lab.  Same shape: defaultdict(None) with sensible defaults pre-set."""
+    """Params dict (defaultdict(None)) with sensible defaults pre-set."""
     p = defaultdict(lambda: None)
     p["db_name"] = "db1"
     p["ravendb_domain"] = "ignored-in-unit-tests"
@@ -71,8 +60,7 @@ def test_k_docs_raises_on_count_zero():
 
 
 def test_k_docs_raises_when_any_put_fails(monkeypatch):
-    """3 PUTs requested, 2 succeed, 1 returns 500.  Must raise loud, NOT
-    return 'WROTE 2/3' as a soft success."""
+    """3 PUTs, one returns 500 -> raises."""
     monkeypatch.setattr(writes, "request", _fake_first_n_ok_then_fail(2))
 
     print(f"\n    expected: RuntimeError mentioning '1/3 PUTs failed'")
@@ -213,7 +201,7 @@ def test_k_timeseries_append_raises_when_an_entry_fails(monkeypatch):
 
 
 def test_k_timeseries_delete_range_raises_on_non_2xx(monkeypatch):
-    """The POST returned HTTP 500 but the old code reported 'DELETED ...' anyway."""
+    """delete-range POST returns HTTP 500 -> raises."""
     monkeypatch.setattr(writes, "request", _fake_ok(500))
 
     print(f"\n    expected: RuntimeError mentioning 'delete-range' and 'HTTP 500'")
@@ -234,9 +222,8 @@ def test_k_delete_raises_on_no_ids_and_no_prefix():
 
 
 def test_k_delete_raises_when_any_delete_fails(monkeypatch):
-    """3 ids, 1 returns non-204 -> raise.  Old code returned a soft message."""
+    """3 ids, one returns non-204 -> raises."""
     monkeypatch.setattr(writes, "request", _fake_first_n_ok_then_fail(2, fail_status=500))
-    # Override _fake to use 204 for success since k_delete checks status==204.
     state = {"calls": 0}
     def fake(method, target, domain, path, client_cert, ca_cert,
              body=None, content_type=None, timeout=30):
@@ -269,8 +256,7 @@ def test_k_restore_revision_raises_on_missing_revision_cv():
 
 
 def test_k_restore_revision_raises_on_get_failure(monkeypatch):
-    """GET /revisions returned HTTP 500 -- old code crashed on json.loads; now
-    it raises loud with the status."""
+    """GET /revisions returns HTTP 500 -> raises."""
     monkeypatch.setattr(writes, "request", _fake_ok(500))
 
     print(f"\n    expected: RuntimeError mentioning 'GET revision' and 'HTTP 500'")

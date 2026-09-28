@@ -1,33 +1,9 @@
-##################################################################################################
-# toolbox/service/upgrade_node.yml
+# toolbox/service/upgrade_node.yml -- upgrade or downgrade RavenDB on a single node via the ravendb_node role.
 #
-# Upgrades (or downgrades) RavenDB on a single node.  Reuses the upstream
-# ravendb.ravendb.ravendb_node role with state=present + a new version -- the role
-# detects the existing install and swaps binaries in place.  Use this as the building
-# block for rolling-upgrade scenarios.
+# Inputs:  target (required); rdb_version OR custom_build (one required; custom_build requires --skip-tags download);
+#          timeout_secs (default 120).
 #
-# Works in both target_modes:
-#   * docker -- adds the target to ravendb_nodes with docker-connection, runs the role.
-#   * ssh    -- the target is already in ravendb_nodes (from inventory/ssh_hosts.yml), runs the role.
-#
-# INPUTS:
-#   target        REQUIRED.  Node name (e.g. 1a).
-#   rdb_version   OPTIONAL.  Exact RavenDB version to install (e.g. 7.2.3).
-#                            Either this OR custom_build must be set.
-#   custom_build  OPTIONAL.  Path or URL to a .deb to upgrade to.
-#                            Requires --skip-tags download.
-#   timeout_secs  OPTIONAL.  Default 120.  Wait budget for the node to come back.
-#
-# RUN EXAMPLES:
-#   # docker -- specific version
-#   ansible-playbook toolbox/service/upgrade_node.yml -e target=1a -e rdb_version=7.2.3
-#
-#   # docker -- custom build
-#   ansible-playbook toolbox/service/upgrade_node.yml -e target=1a -e custom_build=/tmp/raven-x.deb --skip-tags download
-#
-#   # ssh
-#   ansible-playbook -i inventory/ssh_hosts.yml toolbox/service/upgrade_node.yml -e target=1a -e rdb_version=7.2.3
-##################################################################################################
+# Example: ansible-playbook toolbox/service/upgrade_node.yml -e target=1a -e rdb_version=7.2.3
 
 
 - name: Register target for docker mode (no-op in ssh mode)
@@ -104,7 +80,6 @@
         ravendb_state: present
         ravendb_version: "{{ rdb_version | default(omit) }}"
         ravendb_release_channel: stable
-        # arm64 on aarch64 hosts, x64 elsewhere
         ravendb_arch: "{{ 'linux-arm64' if ansible_architecture in ['aarch64','arm64'] else 'linux-x64' }}"
         ravendb_settings_preset: default
         ravendb_secured_self_signed_enabled: true

@@ -1,50 +1,31 @@
-##################################################################################################
 # playbooks/form_clusters.yml
 #
-# Joins every container into a RavenDB cluster based on its name.  Container `1a` becomes the
-# leader of cluster 1; `1b` and `1c` join it as Members.  Container `2a` becomes the leader of
-# cluster 2; `2b` and `2c` join it.  And so on.  Run AFTER install_ravendb.yml.
+# Joins every node into a RavenDB cluster based on its name: container 1a leads
+# cluster 1 with 1b/1c as Members, 2a leads cluster 2, and so on. Run after
+# install_ravendb.yml.
 #
 # Works in both target_modes:
-#   * docker -- discovers containers from docker_network_name, derives node IPs from the bridge,
-#               rewrites /etc/hosts every run (container IPs may shift across restarts).
-#   * ssh    -- reads ravendb_nodes from inventory, uses each host's ansible_host as its IP.
-#               /etc/hosts is written from stable inventory IPs.
+#   * docker -- discovers containers from docker_network_name and derives IPs
+#               from the bridge.
+#   * ssh    -- reads ravendb_nodes from inventory and uses each host's
+#               ansible_host as its IP.
 #
-# What it does, in order:
-#   1. Installs the python `ravendb` client on the controller (the `ravendb.ravendb.node`module that does the actual cluster-join needs it).
-#   2. Builds the (name -> ip, cluster_id, node_letter) maps:
-#         docker -> from docker_network_info + name parsing.
-#         ssh    -> from inventory's ansible_host + per-host cluster_id/node_letter.
-#   3. Writes the /etc/hosts block on the controller AND inside every container/Pi.
-#   5. Waits until each cluster's leader (the `a` node) is responding on HTTPS.
-#   6. Calls the ravendb.ravendb.node module once per non-leader container to add it
-#      to its cluster's leader as a Member.
-#   7. Reads the final topology from each leader and prints a summary
-#      table (tag / container / url per cluster).
+# What it does:
+#   1. Installs the python ravendb client on the controller.
+#   2. Builds the name -> (ip, cluster_id, node_letter) maps.
+#   3. Writes the /etc/hosts block on the controller and every node.
+#   4. Waits until each cluster leader responds on HTTPS.
+#   5. Joins each non-leader node to its leader as a Member.
+#   6. Reads the final topology and prints a summary per cluster.
 #
-# INPUTS (all overridable via `-e key=value`; defaults live in inventory/group_vars/all.yml):
-#   docker_network_name  shared docker network to discover containers from   (default: hubsinknet)
-#   ravendb_domain       domain stamped into each node's URL                 (default: hubsink.test)
-#   cert_dir             folder containing client.pem and ca.crt             (default: /mnt/c/dev/hub-sink/selfsignedmaterials)
-#                        cert_ca_crt and friends are derived from this in group_vars;
-#                        override cert_dir and they all follow.
+# Inputs (override with -e key=value; defaults in inventory/group_vars/all.yml):
+#   docker_network_name  docker network to discover containers from
+#   ravendb_domain       domain stamped into each node's URL
+#   cert_dir             folder containing client.pem and ca.crt
 #
-# RUN EXAMPLES:
-#   # use all defaults
+# Run:
 #   ansible-playbook playbooks/form_clusters.yml -K
-#
-#   # point at a different cert folder
 #   ansible-playbook playbooks/form_clusters.yml -K -e cert_dir=/path/to/certs
-#
-# NOTES:
-#   * Requires sudo on the controller (-K) -- it edits /etc/hosts.
-#   * The leader for each cluster is hard-coded to be the `a` node (e.g. 1a, 2a, ...).
-#     This convention is also relied on by scenarios when they look up cluster leaders.
-#   * Idempotent.  Re-running on an already-formed cluster is a safe no-op.
-#   * /etc/hosts inside containers gets rewritten if container IPs changed between runs --
-#     re-run this if you ever restart containers and IPs shift on the bridge.
-##################################################################################################
 
 - name: Ensure ravendb python client is available on the controller
   hosts: localhost
@@ -81,7 +62,7 @@
   gather_facts: false
 
   tasks:
-    # ---------- docker mode: discover containers from the shared network ------------------------
+    # docker mode: discover containers from the shared network
     - name: (docker mode) Inspect the shared docker network
       community.docker.docker_network_info:
         name: "{{ docker_network_name }}"
@@ -106,13 +87,13 @@
       changed_when: false
       when: target_mode | default('docker') == 'docker'
 
-    # ---------- ssh mode: read everything from inventory ----------------------------------------
+    # ssh mode: read everything from inventory
     - name: (ssh mode) Build {name -> ip} map from inventory's ansible_host
       ansible.builtin.set_fact:
         node_ip_map: "{{ dict(groups['ravendb_nodes'] | zip(groups['ravendb_nodes'] | map('extract', hostvars, 'ansible_host'))) }}"
       when: target_mode | default('docker') == 'ssh'
 
-    # ---------- both modes: sorted names + hosts_block (for the docker-mode rewrite below) ------
+    # both modes: sorted names + hosts_block
     - name: Sort names for stable iteration
       ansible.builtin.set_fact:
         container_names: "{{ node_ip_map.keys() | list | sort }}"
@@ -125,7 +106,7 @@
           {% endfor %}
 
 
-# ============== /etc/hosts rewrite (both modes) =================================================
+# /etc/hosts rewrite (both modes)
 
 - name: Write the hubsink /etc/hosts block on the controller
   hosts: localhost
@@ -137,10 +118,6 @@
     - name: Upsert the ANSIBLE MANAGED CHAOS LAB block in /etc/hosts
       ansible.builtin.blockinfile:
         path: /etc/hosts
-        # Scope the marker per docker network so parallel scenarios (RV-1 on rv1net,
-        # RP-1 on rp1net, RPV-1 on rpv1net) maintain DISJOINT /etc/hosts blocks instead
-        # of stomping on each other -- otherwise the second scenario's form_clusters
-        # erases the first scenario's host entries and curl rc=6 follows.
         marker: "# {mark} ANSIBLE MANAGED CHAOS LAB ({{ docker_network_name | default('default') }})"
         block: "{{ hostvars['localhost'].hosts_block }}"
 
@@ -162,10 +139,6 @@
     - name: Upsert the ANSIBLE MANAGED CHAOS LAB block in /etc/hosts (on target)
       ansible.builtin.blockinfile:
         path: /etc/hosts
-        # Scope the marker per docker network so parallel scenarios (RV-1 on rv1net,
-        # RP-1 on rp1net, RPV-1 on rpv1net) maintain DISJOINT /etc/hosts blocks instead
-        # of stomping on each other -- otherwise the second scenario's form_clusters
-        # erases the first scenario's host entries and curl rc=6 follows.
         marker: "# {mark} ANSIBLE MANAGED CHAOS LAB ({{ docker_network_name | default('default') }})"
         block: "{{ hostvars['localhost'].hosts_block }}"
         unsafe_writes: true

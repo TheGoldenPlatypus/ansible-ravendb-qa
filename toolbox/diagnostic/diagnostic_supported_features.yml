@@ -1,20 +1,10 @@
-##################################################################################################
-# toolbox/diagnostic/diagnostic_supported_features.yml
+# toolbox/diagnostic/diagnostic_supported_features.yml -- print DatabaseRecord.SupportedFeatures
+# for one db on one node.
 #
-# Reads DatabaseRecord.SupportedFeatures for one db on one node and prints the dict.
-# Used after a rolling upgrade to confirm the new build's optional features actually
-# flipped on for the database (they only do once every node reports upgraded).
+# Inputs:  target (node to query), db_name (database whose record to read) (required).
 #
-# Raises if /admin/databases returns non-200 (db missing or node unreachable).
-#
-# INPUTS:
-#   target              REQUIRED.  Node to query.
-#   db_name             REQUIRED.  Database whose record to read.
-#
-# RUN EXAMPLE:
-#   ansible-playbook toolbox/diagnostic/diagnostic_supported_features.yml \
-#       -e target=1a -e db_name=db1
-##################################################################################################
+# Example: ansible-playbook toolbox/diagnostic/diagnostic_supported_features.yml \
+#              -e target=1a -e db_name=db1
 
 - name: Read DatabaseRecord.SupportedFeatures
   hosts: localhost

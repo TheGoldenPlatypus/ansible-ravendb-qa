@@ -11,19 +11,13 @@ from pathlib import Path
 
 import pytest
 
-# tests/conftest.py installs the ansible.module_utils shim + sys.path.
-# Make sure that ran before we import any diagnostic-side modules.
-import conftest  # noqa: F401  (the parent conftest)
+import conftest  # noqa: F401
 
-# Add this directory so `from raven_lab import ...` works in integration tests.
 sys.path.insert(0, str(Path(__file__).parent))
 
 from ravendb_embedded import EmbeddedServer, ServerOptions
 
 
-# Each "node" gets a chaos-style name (1a, 1b, 1c) so the diagnostic module's
-# log lines match what scenarios print.  TARGET_URL_OVERRIDES maps that name
-# to the embedded server's actual URL.
 _NODE_LETTERS = "abcdefghi"
 
 
@@ -67,7 +61,6 @@ def _activate_license(url, license_obj):
 
 
 def _start_node(http_port, tcp_port):
-    # Fresh tempdirs per node per test -- no collision risk from stale runs.
     data_dir = tempfile.mkdtemp(prefix="raven-test-data-")
     logs_dir = tempfile.mkdtemp(prefix="raven-test-logs-")
     s = EmbeddedServer()
@@ -77,13 +70,12 @@ def _start_node(http_port, tcp_port):
     opts.server_url = "http://127.0.0.1:%d" % http_port
     opts.command_line_args = ["--ServerUrl.Tcp=tcp://127.0.0.1:%d" % tcp_port]
     s.start_server(opts)
-    # Stash the dirs on the server object so the fixture can clean them up.
     s._test_dirs = (data_dir, logs_dir)
     return s
 
 
 def _form_cluster(urls):
-    """Add each non-leader URL to node-0's cluster as a Member."""
+    """Join each non-leader URL to node-0's cluster as a Member."""
     leader = urls[0]
     for other in urls[1:]:
         status, body = _http("PUT", "%s/admin/cluster/node?url=%s" % (leader, other))
@@ -91,7 +83,6 @@ def _form_cluster(urls):
             raise RuntimeError(
                 "cluster join failed (leader=%s other=%s): HTTP %d %s"
                 % (leader, other, status, body[:300]))
-    # Wait for every URL to appear as a Member in the leader's topology.
     def all_members():
         status, body = _http("GET", "%s/cluster/topology" % leader, timeout=5)
         if status != 200:
@@ -128,40 +119,16 @@ def _wait_for_db_on_all(urls, db):
 
 @pytest.fixture
 def ravendb_cluster():
-    """Return a factory: cluster_info = ravendb_cluster(n_nodes=2, db="db1").
-
-    cluster_info is a dict:
-        {
-          "nodes": ["1a", "1b"],      # chaos-style names, usable as `target`
-          "urls":  ["http://127.0.0.1:..."]
-          "db":    "db1",
-        }
-
-    TARGET_URL_OVERRIDES is wired so request("GET", "1a", ...) hits the right
-    embedded server.  Cleaned up at end of test (servers killed, overrides cleared).
-    """
+    """Factory fixture returning a dict of {nodes, urls, db} for embedded servers."""
     started = []
     saved_overrides = None
 
     def _build(n_nodes=1, db="db1", replication_factor=None, cluster=True):
-        """Bring up N embedded RavenDB servers.
-
-        cluster=True (default): form them into a real cluster + create the db
-            with replication_factor=N (or override).  Requires a Developer
-            license -- set RAVEN_TEST_LICENSE=/path/to/license.json.
-        cluster=False: leave them as N independent servers, create db on each
-            one separately (each gets its OWN dbid, so CVs naturally differ
-            across nodes -- great for testing the FAIL paths of CV kinds).
-        """
+        """Bring up N embedded RavenDB servers, clustered or independent."""
         nonlocal saved_overrides
         if replication_factor is None:
             replication_factor = n_nodes if cluster else 1
 
-        # Activate a license whenever RAVEN_TEST_LICENSE is set -- needed for
-        # both multi-node cluster formation AND for single-node features like
-        # external_replication.  Multi-node clustered tests require the
-        # license; tests using cluster=False that need licensed features will
-        # also benefit when it's set.
         license_path = os.environ.get("RAVEN_TEST_LICENSE")
         if cluster and n_nodes > 1 and not license_path:
             pytest.skip(
@@ -179,7 +146,7 @@ def ravendb_cluster():
             started.append(srv)
             url = srv.get_server_uri()
             urls.append(url)
-            nodes.append("1" + _NODE_LETTERS[i])    # 1a, 1b, 1c, ...
+            nodes.append("1" + _NODE_LETTERS[i])
             if license_obj is not None:
                 _activate_license(url, license_obj)
 
@@ -189,11 +156,9 @@ def ravendb_cluster():
             _create_database(urls[0], db, replication_factor)
             _wait_for_db_on_all(urls, db)
         else:
-            # Independent servers: create the db on each separately.
             for url in urls:
                 _create_database(url, db, 1)
 
-        # Wire up the override table so request() can reach these nodes.
         import ravendb_client
         saved_overrides = dict(ravendb_client.TARGET_URL_OVERRIDES)
         ravendb_client.TARGET_URL_OVERRIDES.clear()
@@ -204,7 +169,6 @@ def ravendb_cluster():
 
     yield _build
 
-    # ---- teardown ----
     if saved_overrides is not None:
         import ravendb_client
         ravendb_client.TARGET_URL_OVERRIDES.clear()

@@ -1,32 +1,10 @@
-##################################################################################################
-# toolbox/diagnostic/diagnostic_partition_list.yml
+# toolbox/diagnostic/diagnostic_partition_list.yml -- list active chaos iptables rules
+# (REJECT/DROP, INPUT+OUTPUT) across every node and print a per-node summary. Read-only.
 #
-# Read-only.  Enumerates active chaos iptables rules (REJECT or DROP, INPUT + OUTPUT) across
-# every node and prints a per-node summary.  Use this as the sanity check before starting a
-# scenario ("partition.list() should be empty") and after heal_all ("re-confirm empty").
+# Inputs:  target_mode (optional, docker [default] or ssh); targets (optional, JSON list
+#          overriding auto-discovery, e.g. '["1a","2b"]').
 #
-# Output: one line per node.  When rules exist, every rule is printed with the peer IP mapped
-# back to its node name so you can read at a glance who's cut off from whom.  When a node has
-# zero chaos rules, you get a single "CLEAN" line.
-#
-# IMPLEMENTATION:
-#   target_mode=docker (default) -> all containers on docker_network_name
-#   target_mode=ssh              -> all hosts in groups['ravendb_nodes']
-#   Optional `targets` JSON list overrides the auto-discovered list.
-#
-# INPUTS:
-#   targets  OPTIONAL.  JSON list overriding auto-discovery (e.g. '["1a","2b"]').
-#
-# RUN EXAMPLES:
-#   # docker -- list across the lab
-#   ansible-playbook toolbox/diagnostic/diagnostic_partition_list.yml
-#
-#   # ssh -- list across every inventory host
-#   ansible-playbook -i inventory/ssh_hosts.yml toolbox/diagnostic/diagnostic_partition_list.yml -K
-#
-#   # surgical override -- check only these two
-#   ansible-playbook toolbox/diagnostic/diagnostic_partition_list.yml -e '{"targets":["1a","1b"]}'
-##################################################################################################
+# Example: ansible-playbook toolbox/diagnostic/diagnostic_partition_list.yml
 
 - name: List active chaos iptables rules across every node
   hosts: localhost

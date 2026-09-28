@@ -1,24 +1,8 @@
-##################################################################################################
-# toolbox/network/partition_set.yml
+# toolbox/network/partition_set.yml -- bidirectionally cut traffic between every pair in set_a x set_b.
 #
-# Bidirectionally cuts traffic between every pair in set_a x set_b in a single call.
-# This is the cross-cluster generalization of cut_link.yml -- cut_link is 1<->1 and
-# partition_node only sees its own cluster via /cluster/topology, neither can express things
-# like "isolate the hub mentor from all 6 sink nodes".
+# Inputs:  set_a, set_b (required; JSON lists of node names).
 #
-# INPUTS:
-#   set_a   REQUIRED.  JSON list of node names (e.g. '["1a"]').
-#   set_b   REQUIRED.  JSON list of node names (e.g. '["1b","1c","2a","2b","2c"]').
-#
-# RUN EXAMPLES:
-#   # P1 docker -- isolate the hub mentor (1a) from the other 8 nodes
-#   ansible-playbook toolbox/network/partition_set.yml \
-#       -e '{"set_a":["1a"],"set_b":["1b","1c","2a","2b","2c","3a","3b","3c"]}'
-#
-#   # P2 ssh -- isolate Sink_A from Hub + Sink_B
-#   ansible-playbook -i inventory/ssh_hosts.yml toolbox/network/partition_set.yml -K \
-#       -e '{"set_a":["2a","2b","2c"],"set_b":["1a","1b","1c","3a","3b","3c"]}'
-##################################################################################################
+# Example: ansible-playbook toolbox/network/partition_set.yml -e '{"set_a":["1a"],"set_b":["1b","1c","2a"]}'
 
 - name: Partition a set of nodes from another set (mode-aware wrapper)
   hosts: localhost
@@ -66,16 +50,8 @@
       ansible.builtin.debug:
         msg: "Will cut {{ pairs | length }} pair(s) via {{ cut_tool }} (mode={{ effective_mode }})"
 
-    # chdir to the repo root so the relative path `toolbox/network/cut_link.yml` resolves.
-    # playbook_dir here = .../toolbox/network/  -- go up TWO levels (../../) to reach the
-    # repo root.  Previously this was `playbook_dir/..` which only went up to `toolbox/`
-    # and the subprocess then failed to find `toolbox/network/cut_link.yml`.
     - name: Run cut_link per pair
       ansible.builtin.command:
-        # Forward docker_network_name so cut_link operates on the SAME network as this
-        # scenario.  Subprocess ansible-playbook calls don't inherit `-e` from the parent
-        # invocation, so without the explicit pass-through cut_link falls back to its
-        # default ('hubsinknet') and inspects the wrong network.
         cmd: >-
           ansible-playbook {{ cut_tool }}
           {% if effective_mode == 'ssh' %}-i inventory/ssh_hosts.yml{% endif %}

@@ -1,40 +1,9 @@
-##################################################################################################
-# toolbox/db/delete_database.yml
+# toolbox/db/delete_database.yml -- delete a database and wipe its on-disk data files from every node in the cluster.
 #
-# Deletes a database AND wipes its data files from every node in the cluster.
+# Inputs:  cluster_leader (any node in the cluster, e.g. 1a), db_name (required);
+#          timeout_secs (default 60), data_dir (default /var/lib/ravendb/data).
 #
-# Why the disk wipe?  RavenDB's python-client default for DeleteDatabaseOperation is
-# hard_delete=False, which removes the database from the cluster topology but leaves
-# the data files on disk at /var/lib/ravendb/data/Databases/<name>/.  When you later
-# recreate the database with the same name, RavenDB re-mounts those files and "old"
-# docs reappear -- including change-vector etag state from the previous incarnation.
-# This tool prevents that by stopping RavenDB on each node, deleting the on-disk
-# directory, and starting it back up.
-#
-# Works in both target_modes (docker / ssh).
-#
-# What it does, in order:
-#   1. Calls the raw DELETE /admin/databases REST API on cluster_leader (removes topology entry).
-#   2. Polls /databases on the leader until the db is no longer listed.
-#   3. Discovers every node in the same cluster as cluster_leader (same leading id,
-#      e.g. cluster_leader=1a -> peers 1a, 1b, 1c, ...).
-#   4. On EACH peer: systemctl stop ravendb -> rm -rf the db's on-disk dir -> systemctl start ravendb.
-#   5. Waits for each peer's HTTPS endpoint to come back.
-#
-# INPUTS:
-#   cluster_leader  REQUIRED.  Node name of any node in the cluster (e.g. 1a).
-#   db_name         REQUIRED.  Database name to delete.
-#   timeout_secs    OPTIONAL.  Default 60.  Wait budget for the topology delete to propagate.
-#   data_dir        OPTIONAL.  Default /var/lib/ravendb/data.  Base RavenDB data dir on
-#                              each node.  Actual path: <data_dir>/Databases/<db_name>/.
-#
-# RUN EXAMPLES:
-#   # docker
-#   ansible-playbook toolbox/db/delete_database.yml -K -e cluster_leader=1a -e db_name=Tenants
-#
-#   # ssh
-#   ansible-playbook -i inventory/ssh_hosts.yml toolbox/db/delete_database.yml -e cluster_leader=1a -e db_name=Tenants
-##################################################################################################
+# Example: ansible-playbook toolbox/db/delete_database.yml -K -e cluster_leader=1a -e db_name=Tenants
 
 - name: Delete from cluster topology + compute peers
   hosts: localhost
@@ -111,10 +80,6 @@
       loop: "{{ hostvars['localhost'].cluster_peers }}"
       when: target_mode | default('docker') == 'docker'
 
-    # rm + verify in one shell so a silent rm failure (read-only mount,
-    # permission denied, dir held open) can't leave stale db data behind that
-    # would let the next create_database silently inherit old change-vector
-    # state and break test isolation.
     - name: (docker) rm -rf the database's on-disk dir inside each peer (with verify)
       community.docker.docker_container_exec:
         container: "{{ item }}"

@@ -1,31 +1,9 @@
-##################################################################################################
-# toolbox/writes/restore_revision.yml
+# toolbox/writes/restore_revision.yml -- restore an older revision of a single doc as the new live doc.
 #
-# Restores an older revision of a single doc as the new live doc.
-# Implementation: GET the revision's content via /revisions?changeVector=..., then PUT the same
-# body back as the live doc (which becomes the new top revision).
+# Inputs:  target, db_name, doc_id, revision_cv (required; revision_cv is the change-vector
+#          of the revision to restore).
 #
-# INPUTS:
-#   target       REQUIRED.
-#   db_name      REQUIRED.
-#   doc_id       REQUIRED.
-#   revision_cv  REQUIRED.  Change-vector of the revision to restore (opaque string).
-#                           Get it from diagnostic_capture_doc_cv output or Studio Metadata.
-#
-# GOTCHA: change-vectors with multiple entries contain spaces (e.g. "A:3-..., B:2-...").
-# Ansible's `-e key=value` parser truncates values at the first space -- pass the CV via JSON
-# extra-vars instead: `-e '{"revision_cv":"A:3-..., B:2-..."}'`.
-#
-# RUN EXAMPLES:
-#   # single-entry CV (no spaces) -- key=value form works:
-#   ansible-playbook toolbox/writes/restore_revision.yml -e target=1a -e db_name=Tenants \
-#       -e doc_id=files/1 -e revision_cv='A:3-uQvp4csQpESZNSbifH8hxQ'
-#
-#   # multi-entry CV (replicated revision) -- must use JSON form:
-#   ansible-playbook toolbox/writes/restore_revision.yml -e target=1a -e db_name=Tenants \
-#       -e doc_id=files/1 \
-#       -e '{"revision_cv":"A:107-Er00LwYa5UyketmLwIqMlA, C:106-STkzWe2uHEqjayzYRRc4Vg"}'
-##################################################################################################
+# Example: ansible-playbook toolbox/writes/restore_revision.yml -e target=1a -e db_name=Tenants -e doc_id=files/1 -e revision_cv='A:3-uQvp4csQpESZNSbifH8hxQ'
 
 - name: Restore an older revision as the live doc
   hosts: localhost

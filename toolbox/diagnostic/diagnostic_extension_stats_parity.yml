@@ -1,29 +1,14 @@
-##################################################################################################
-# toolbox/diagnostic/diagnostic_extension_stats_parity.yml
+# toolbox/diagnostic/diagnostic_extension_stats_parity.yml -- per-aspect /stats parity across
+# nodes for:
+#   attachments -> CountOfUniqueAttachments + CountOfAttachments
+#   counters    -> CountOfCounterEntries
+#   timeseries  -> CountOfTimeSeriesSegments
 #
-# Per-aspect parity for the three "extension" /stats fields that hang off documents
-# (attachments, counters, time-series).  Specifically:
-#   attachments  -> CountOfUniqueAttachments + CountOfAttachments
-#   counters     -> CountOfCounterEntries
-#   timeseries   -> CountOfTimeSeriesSegments
+# Inputs:  db_name, nodes (required); aspects (optional, CSV subset of
+#          attachments,counters,timeseries, default all three); assert_mode (optional, default false).
 #
-# Pairs with diagnostic_doc_count_parity (CountOfDocuments).  Info by default; pass
-# assert_mode=true to fail on drift.
-#
-# INPUTS:
-#   db_name      REQUIRED.
-#   nodes        REQUIRED.
-#   aspects      OPTIONAL.  CSV subset of [attachments,counters,timeseries].  Default: all three.
-#   assert_mode  OPTIONAL.  Default false.
-#
-# RUN EXAMPLES:
-#   ansible-playbook toolbox/diagnostic/diagnostic_extension_stats_parity.yml \
-#       -e db_name=db1 -e '{"nodes":["9a","9b","9c"]}'
-#
-#   ansible-playbook toolbox/diagnostic/diagnostic_extension_stats_parity.yml \
-#       -e db_name=db1 -e aspects=attachments,counters \
-#       -e '{"nodes":["9a","9b","9c"]}'
-##################################################################################################
+# Example: ansible-playbook toolbox/diagnostic/diagnostic_extension_stats_parity.yml \
+#              -e db_name=db1 -e '{"nodes":["9a","9b","9c"]}'
 
 - name: Extension /stats parity across nodes (attachments / counters / time-series)
   hosts: localhost

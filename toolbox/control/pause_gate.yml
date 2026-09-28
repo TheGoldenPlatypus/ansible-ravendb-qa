@@ -1,29 +1,8 @@
-##################################################################################################
-# toolbox/control/pause_gate.yml
+# toolbox/control/pause_gate.yml -- print a section banner and optionally pause for ENTER before continuing.
 #
-# Section banner + opt-in pause gate.  Invoked at the top of every scenario section.  Two jobs:
+# Inputs:  section_label (required; shown in banner/prompt); pause_between_sections (default false; true to pause).
 #
-#   1. ALWAYS print a 3-line ASCII banner identifying the section.  Makes section boundaries
-#      easy to spot in long log files (default ansible output buries single-line msgs).  Also
-#      the wrapping PLAY name uses the section label, so the standard `PLAY [...]` header line
-#      is also self-documenting.
-#
-#   2. When `pause_between_sections=true`, additionally pause and wait for ENTER before
-#      continuing (Ctrl-C then 'A' aborts).  When the toggle is unset/false (the default),
-#      no pause -- the playbook flows straight through after printing the banner.
-#
-# DO NOT enable pause_between_sections for unattended / CI runs: any background workload
-# launched by the scenario keeps running during the pause.
-#
-# INPUTS:
-#   section_label              REQUIRED.  Short string shown in the banner + prompt
-#                                         (e.g. "SECTION 5 -- upgrade 1a").
-#   pause_between_sections     OPTIONAL.  Default false.  Set true to actually pause.
-#
-# USAGE (from a scenario):
-#   - ansible.builtin.import_playbook: ../../../toolbox/control/pause_gate.yml
-#     vars: { section_label: "SECTION 5 -- upgrade 1a" }
-##################################################################################################
+# Example: import_playbook ../../../toolbox/control/pause_gate.yml with vars: { section_label: "SECTION 5" }
 
 - name: ">>> {{ section_label | default('next section') }} <<<"
   hosts: localhost

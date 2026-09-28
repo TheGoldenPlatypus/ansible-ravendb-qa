@@ -1,4 +1,5 @@
 #!/usr/bin/python
+"""ravendb_backup -- Ansible module that triggers and restores RavenDB backups."""
 
 import json
 import os
@@ -12,6 +13,7 @@ from ansible.module_utils.polling import poll_until
 
 
 def log_line(progress_log, message):
+    """Append a timestamped line to `progress_log` if one is configured."""
     if not progress_log:
         return
     with open(progress_log, "a") as f:
@@ -19,6 +21,7 @@ def log_line(progress_log, message):
 
 
 def wait_for_operation(p, target, base_path, op_id, timeout, interval, progress_log):
+    """Poll /operations/state for `op_id` until it reaches a terminal state; return (state, elapsed)."""
     state_path = "%s/operations/state?id=%d" % (base_path, op_id)
 
     log_line(progress_log,
@@ -58,10 +61,7 @@ def wait_for_operation(p, target, base_path, op_id, timeout, interval, progress_
 
 
 def get_backup_status(p, target, db, task_id):
-    """Returns the Status dict, or None ONLY when the task has never produced a
-    backup yet (200 with Status=null).  Any other failure (4xx/5xx/network)
-    raises RuntimeError so the polling loop doesn't mistake a server error for
-    'still in progress' and run out its budget on nothing."""
+    """Return the backup Status dict, or None when the task has never produced a backup yet."""
     status_path = "/periodic-backup/status?name=%s&taskId=%d" % (quote(db), task_id)
     status, body = request("GET", target, p["ravendb_domain"], status_path,
                            p["client_cert"], p["ca_cert"])
@@ -71,11 +71,11 @@ def get_backup_status(p, target, db, task_id):
             "can't distinguish in-progress from real server failure"
             % (target, db, task_id, status, (body or b"")[:300]))
     data = json.loads(body)
-    # 200 with Status=null is legitimate: task created, no backup has run yet.
     return data.get("Status") or None
 
 
 def k_backup(p):
+    """Create a periodic-backup task, trigger it, wait for completion, and clean up the task."""
     target = p["target"]
     db = p["db_name"]
     backup_type = p["backup_type"] or "Backup"
@@ -87,7 +87,7 @@ def k_backup(p):
 
     task_name = "manual-%s-%d" % (timestamp, random.randint(0, 9999))
 
-    # 1. Create a periodic-backup task scheduled far in the future (won't auto-fire).
+    # 1. Create a periodic-backup task scheduled far in the future.
     task_body = {
         "Name": task_name,
         "BackupType": backup_type,
@@ -113,7 +113,6 @@ def k_backup(p):
     log_line(progress_log, "task created  name=%s  taskId=%d" % (task_name, task_id))
 
     # 2. Capture the baseline LastFullBackup (may be None for a fresh task).
-    #    "Done" is detected when LastFullBackup ADVANCES past this value.
     baseline = get_backup_status(p, target, db, task_id)
     baseline_lfb = (baseline or {}).get("LastFullBackup")
     log_line(progress_log, "baseline LastFullBackup=%s" % baseline_lfb)
@@ -126,8 +125,7 @@ def k_backup(p):
         raise RuntimeError("trigger backup failed: HTTP %d" % status)
     log_line(progress_log, "backup TRIGGERED  taskId=%d" % task_id)
 
-    # 4. Poll /periodic-backup/status until LastFullBackup advances or the local backup
-    #    records an Exception.
+    # 4. Poll until LastFullBackup advances or the local backup records an Exception.
     def predicate():
         log_line(progress_log, "polling  taskId=%d" % task_id)
         s = get_backup_status(p, target, db, task_id)
@@ -175,6 +173,7 @@ def k_backup(p):
 
 
 def k_restore(p):
+    """Trigger a local restore into a new database and wait for the operation to complete."""
     target = p["target"]
     backup_path = p["backup_path"]
     new_db = p["new_db_name"]

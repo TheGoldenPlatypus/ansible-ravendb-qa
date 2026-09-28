@@ -1,24 +1,9 @@
-##################################################################################################
-# toolbox/backup/restore_backup.yml
+# toolbox/backup/restore_backup.yml -- restore a backup folder (present on the target's filesystem) as a new database, waiting for completion.
 #
-# Restores a backup folder as a new database.  The backup folder must be present on the target
-# node's filesystem (use `docker cp` to move files between containers if needed).  Waits for the
-# restore operation to complete.
+# Inputs:  target, backup_path (absolute path to the backup folder on target), new_db_name (required);
+#          timeout_secs (default 600), poll_interval (default 3).
 #
-# Long-running: large restores can take minutes.  Open a second terminal and `tail -F` the
-# printed progress log to watch per-poll status live.
-#
-# INPUTS:
-#   target           REQUIRED.
-#   backup_path      REQUIRED.  Absolute path to the backup folder on target.
-#   new_db_name      REQUIRED.
-#   timeout_secs     OPTIONAL.  Default 600.
-#   poll_interval    OPTIONAL.  Default 3.
-#
-# RUN EXAMPLE:
-#   ansible-playbook toolbox/backup/restore_backup.yml -e target=1a \
-#       -e backup_path=/backups/Tenants-20260528-180000 -e new_db_name=Tenants_restored
-##################################################################################################
+# Example: ansible-playbook toolbox/backup/restore_backup.yml -e target=1a -e backup_path=/backups/Tenants-20260528-180000 -e new_db_name=Tenants_restored
 
 - name: Restore a backup as a new database and wait for completion
   hosts: localhost

@@ -1,17 +1,8 @@
-##################################################################################################
-# toolbox/network/cut_link.yml
+# toolbox/network/cut_link.yml -- REJECT all TCP between two containers in both directions.
 #
-# REJECTs all TCP traffic between two containers in both directions.  Uses
-# `-p tcp -j REJECT --reject-with tcp-reset` so existing connections are torn down
-# immediately (DROP would silently black-hole packets and existing TCP would survive).
+# Inputs:  node_a, node_b (required).
 #
-# INPUTS:
-#   node_a  REQUIRED.  First container.
-#   node_b  REQUIRED.  Second container.
-#
-# RUN EXAMPLE:
-#   ansible-playbook toolbox/network/cut_link.yml -e node_a=1a -e node_b=1b
-##################################################################################################
+# Example: ansible-playbook toolbox/network/cut_link.yml -e node_a=1a -e node_b=1b
 
 - name: Cut the link between two containers
   hosts: localhost

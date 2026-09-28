@@ -1,26 +1,11 @@
-##################################################################################################
-# toolbox/diagnostic/diagnostic_schema_version.yml
+# toolbox/diagnostic/diagnostic_schema_version.yml -- print FullVersion from /build/version per node.
 #
-# Reads /build/version from every node and prints FullVersion per node.  Pure info by default.
-# Optional asserts (only fire when assert_mode=true):
-#   require_parity      -- every node must report the same FullVersion.
-#   expected_version    -- every node's FullVersion must contain this substring (e.g. "6.2").
+# Inputs:  nodes (required, JSON list); require_parity (optional, default false, all nodes same
+#          FullVersion); expected_version (optional, substring e.g. "6.2"); assert_mode (optional,
+#          default false, required for require_parity / expected_version to fail).
 #
-# For the DatabaseRecord.SupportedFeatures dump (used after rolling upgrades to confirm the
-# new build's features actually flipped on for a database), see diagnostic_supported_features.yml.
-#
-# INPUTS:
-#   nodes               REQUIRED.  JSON list of node names.
-#   require_parity      OPTIONAL.  Default false.
-#   expected_version    OPTIONAL.  Substring (e.g. "6.2").
-#   assert_mode         OPTIONAL.  Default false.  Required to make require_parity / expected_version fail.
-#
-# RUN EXAMPLES:
-#   ansible-playbook toolbox/diagnostic/diagnostic_schema_version.yml -e '{"nodes":["1a","1b","1c"]}'
-#   ansible-playbook toolbox/diagnostic/diagnostic_schema_version.yml \
-#       -e require_parity=true -e expected_version=6.2 -e assert_mode=true \
-#       -e '{"nodes":["1a","1b","1c"]}'
-##################################################################################################
+# Example: ansible-playbook toolbox/diagnostic/diagnostic_schema_version.yml \
+#              -e '{"nodes":["1a","1b","1c"]}'
 
 - name: Read /build/version per node
   hosts: localhost

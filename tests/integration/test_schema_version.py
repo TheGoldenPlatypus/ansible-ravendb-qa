@@ -1,12 +1,4 @@
-"""
-Tests for k_schema_version.
-
-What the kind does:  reports the RavenDB build version on each node.
-                     Two optional asserts: require_parity (every node same
-                     version) and expected_version (substring match).
-Returns:             list[str]
-Raises:              RuntimeError if NO node responded to /build/version.
-"""
+"""Tests for k_schema_version."""
 
 import pytest
 
@@ -29,15 +21,13 @@ def test_schema_version_reports_one_line_per_node(ravendb_cluster):
 
 
 def test_expected_version_match_does_not_raise(ravendb_cluster):
-    """assert_mode + expected_version contained in the real version => PASSes
-    silently (returns lines, no raise)."""
+    """assert_mode + a matching expected_version substring -> no raise."""
     info = ravendb_cluster(n_nodes=1)
     node = info["nodes"][0]
 
-    # First read the real version, then assert against a substring of it.
     lines = diag.k_schema_version(params(nodes=[node]))
-    actual_version_line = lines[1].strip()    # e.g. "1a  7.1.5"
-    version_prefix = actual_version_line.split()[-1].split(".")[0]   # "7"
+    actual_version_line = lines[1].strip()
+    version_prefix = actual_version_line.split()[-1].split(".")[0]
 
     print(f"\n    expected: no raise; expected_version='{version_prefix}' matches '{actual_version_line}'")
     result = diag.k_schema_version(
@@ -47,8 +37,7 @@ def test_expected_version_match_does_not_raise(ravendb_cluster):
 
 
 def test_expected_version_mismatch_raises(ravendb_cluster):
-    """assert_mode + a version substring the node doesn't have => raises
-    DiagnosticViolation with the FAIL line."""
+    """assert_mode + an absent expected_version -> raises DiagnosticViolation."""
     info = ravendb_cluster(n_nodes=1)
     node = info["nodes"][0]
 
@@ -63,10 +52,8 @@ def test_expected_version_mismatch_raises(ravendb_cluster):
 
 
 def test_all_nodes_unreachable_raises(ravendb_cluster):
-    """When NO node responds to /build/version, fail loud -- silently returning
-    an empty version map is a footgun."""
-    info = ravendb_cluster(n_nodes=1)   # spin a real server so the fixture's
-                                         # teardown restores TARGET_URL_OVERRIDES
+    """No node responds to /build/version -> RuntimeError."""
+    info = ravendb_cluster(n_nodes=1)
 
     import ravendb_client
     ravendb_client.TARGET_URL_OVERRIDES.clear()

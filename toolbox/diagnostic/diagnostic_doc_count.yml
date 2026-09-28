@@ -1,15 +1,8 @@
-##################################################################################################
-# toolbox/diagnostic/diagnostic_doc_count.yml
+# toolbox/diagnostic/diagnostic_doc_count.yml -- print CountOfDocuments from /stats for one node.
 #
-# Reads CountOfDocuments from /stats on a target node and prints it.  Pure info, no assert.
+# Inputs:  target, db_name (required).
 #
-# INPUTS:
-#   target   REQUIRED.
-#   db_name  REQUIRED.
-#
-# RUN EXAMPLE:
-#   ansible-playbook toolbox/diagnostic/diagnostic_doc_count.yml -e target=1b -e db_name=Tenants
-##################################################################################################
+# Example: ansible-playbook toolbox/diagnostic/diagnostic_doc_count.yml -e target=1b -e db_name=Tenants
 
 - name: Read doc count on a target node
   hosts: localhost

@@ -1,29 +1,12 @@
-##################################################################################################
-# toolbox/wait/wait_for_stats_field_parity.yml
+# toolbox/wait/wait_for_stats_field_parity.yml -- poll /stats until the named count field(s)
+# match across all nodes, or timeout.
 #
-# Polls /stats on each node until the specified count-field(s) match across the convergence
-# set, or a timeout is reached.  Different from wait_for_etag_parity (per-node stability) --
-# this one asserts cross-node equality of named field values right now.
+# Inputs:  db_name, nodes (required, JSON list); fields (optional, JSON list of /stats fields,
+#          default ["CountOfTombstones"]); timeout_secs (optional, default 180); poll_interval
+#          (optional, default 3).
 #
-# Use case: after a workload stops and etags are stable, RavenDB's background tombstone
-# cleanup (and similar background jobs) still needs idle time to bring per-node counts into
-# agreement.  Replaces a fragile fixed sleep with an actual signal.
-#
-# Default field is CountOfTombstones.  Pass `fields` to wait on additional fields (only if
-# you have evidence they converge -- some /stats counts are per-node intrinsic).
-#
-# INPUTS:
-#   db_name        REQUIRED.
-#   nodes          REQUIRED.  JSON list of node names.
-#   fields         OPTIONAL.  JSON list of /stats field names.  Default ["CountOfTombstones"].
-#   timeout_secs   OPTIONAL.  Default 180.  (NOT `timeout` -- reserved Ansible variable name.)
-#   poll_interval  OPTIONAL.  Default 3.
-#
-# RUN EXAMPLES:
-#   ansible-playbook toolbox/wait/wait_for_stats_field_parity.yml -e db_name=db1 -e '{"nodes":["1a","1b","1c"]}'
-#   ansible-playbook toolbox/wait/wait_for_stats_field_parity.yml -e db_name=db1 \
-#       -e '{"nodes":["1a","1b","1c"],"fields":["CountOfTombstones","CountOfDocuments"]}'
-##################################################################################################
+# Example: ansible-playbook toolbox/wait/wait_for_stats_field_parity.yml \
+#              -e db_name=db1 -e '{"nodes":["1a","1b","1c"]}'
 
 - name: Wait until specified /stats fields match across every node
   hosts: localhost

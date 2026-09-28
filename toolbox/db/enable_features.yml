@@ -1,30 +1,10 @@
-##################################################################################################
-# toolbox/db/enable_features.yml
+# toolbox/db/enable_features.yml -- POST a feature-flag change to /databases/<db>/admin/features and verify it in the DatabaseRecord.
 #
-# POST a feature-flag change to /databases/<db>/admin/features and verify it's reflected in
-# the DatabaseRecord before returning.  Used at the end of a rolling upgrade once every node
-# is on the new binary -- flips on v_new-only behaviors that were gated for mixed-binary
-# safety.
+# Inputs:  target (any node hosting the db, or the cluster leader), db_name (required);
+#          add (JSON list of feature names to enable), remove (JSON list to disable);
+#          at least one of add/remove must be non-empty.
 #
-# What it does:
-#   1. Resolve the routing target (passthrough on non-sharded; orchestrator on sharded).
-#   2. POST {"Add": [...], "Remove": [...]} to /databases/<db>/admin/features.
-#   3. GET /admin/databases?name=<db> and confirm every Add feature is now present
-#      (matched in the canonical DatabaseFeatures field OR anywhere in the record) and
-#      every Remove feature is gone.  Raise loud on mismatch.
-#
-# INPUTS:
-#   target      REQUIRED.  Any node that hosts the db (or the cluster leader).
-#   db_name     REQUIRED.
-#   add         OPTIONAL.  JSON list of feature names to enable.
-#   remove      OPTIONAL.  JSON list of feature names to disable.
-#                          At least one of `add`/`remove` must be non-empty.
-#
-# RUN EXAMPLE:
-#   ansible-playbook toolbox/db/enable_features.yml -K \
-#       -e target=1a -e db_name=db1 \
-#       -e '{"add":["PullReplicationCompositeChangeVectors"]}'
-##################################################################################################
+# Example: ansible-playbook toolbox/db/enable_features.yml -K -e target=1a -e db_name=db1 -e '{"add":["SomeFeature"]}'
 
 - name: Enable / disable database feature flags
   hosts: localhost

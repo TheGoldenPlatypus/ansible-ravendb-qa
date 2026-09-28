@@ -1,22 +1,10 @@
-##################################################################################################
-# toolbox/wait/wait_for_leader.yml
+# toolbox/wait/wait_for_leader.yml -- wait until /cluster/topology reports a non-empty Leader.
 #
-# Block until /cluster/topology reports a non-empty Leader on a reachable node.  Use after a
-# leader restart / kill to wait for the election to finish.
+# Inputs:  target (required, any reachable node e.g. 1b); timeout_secs (optional, default 60);
+#          expected_leader (optional, single-letter tag e.g. "B"; wait until Leader contains it,
+#          otherwise any non-empty Leader passes).
 #
-# Optional: pin to an expected leader tag (e.g. "B").  Useful when you want a specific node
-# to win the election (e.g. "expect any v_new node to win in a mid-roll cluster").
-#
-# INPUTS:
-#   target           REQUIRED.  Any reachable node to query (e.g. 1b).
-#   timeout_secs     OPTIONAL.  Default 60.
-#   expected_leader  OPTIONAL.  Single-letter tag (e.g. "B").  If set, wait until the Leader
-#                               field contains this tag.  Otherwise any non-empty Leader passes.
-#
-# RUN EXAMPLES:
-#   ansible-playbook toolbox/wait/wait_for_leader.yml -e target=1b
-#   ansible-playbook toolbox/wait/wait_for_leader.yml -e target=1b -e expected_leader=B
-##################################################################################################
+# Example: ansible-playbook toolbox/wait/wait_for_leader.yml -e target=1b
 
 - name: Wait until cluster reports a Leader
   hosts: localhost

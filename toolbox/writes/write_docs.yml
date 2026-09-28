@@ -1,26 +1,9 @@
-##################################################################################################
-# toolbox/writes/write_docs.yml
+# toolbox/writes/write_docs.yml -- write N docs (ids <id_prefix>/0..N-1) to a target node's DB.
 #
-# Writes N small docs to a target node's database.  Each doc id is `<id_prefix>/<n>`,
-# zero-indexed.  Useful for seeding traffic before a chaos action, or for re-running
-# convergence checks.
+# Inputs:  target, db_name, count (required); id_prefix (default "micro/doc");
+#          body_tag (optional -- adds a "tag" field to each doc body).
 #
-# INPUTS:
-#   target     REQUIRED.  Container name to write to (e.g. 1a).
-#   db_name    REQUIRED.  Database name.
-#   count      REQUIRED.  Integer.  How many docs to write.
-#   id_prefix  OPTIONAL.  Default "micro/doc".  Doc ids become <id_prefix>/0..N-1.
-#   body_tag   OPTIONAL.  When set, body includes a "tag" field.  Useful for the conflict-
-#                         generation pattern -- two writers on the same id pool with distinct
-#                         body_tag values produce content RavenDB resolves as conflicts.
-#                         RavenDB dedupes identical-content PUTs into one revision; body_tag
-#                         is the cheapest way to keep each side's writes distinct.
-#
-# RUN EXAMPLES:
-#   ansible-playbook toolbox/writes/write_docs.yml -e target=1a -e db_name=Tenants -e count=50
-#   ansible-playbook toolbox/writes/write_docs.yml -e target=1a -e db_name=db1 -e count=20 -e id_prefix=probe/burst1
-#   ansible-playbook toolbox/writes/write_docs.yml -e target=1a -e db_name=db1 -e count=100 -e id_prefix=users/conflict -e body_tag=hub
-##################################################################################################
+# Example: ansible-playbook toolbox/writes/write_docs.yml -e target=1a -e db_name=db1 -e count=50
 
 - name: Write N docs to a target node
   hosts: localhost

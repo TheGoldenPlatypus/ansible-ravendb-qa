@@ -1,18 +1,8 @@
-##################################################################################################
-# toolbox/workloads/wait_for_workload_started.yml
+# toolbox/workloads/wait_for_workload_started.yml -- block until a background workload's pidfile appears.
 #
-# Block until a background workload's pidfile appears on the controller -- the gate that
-# confirms a fire-and-forget workload (e.g. workload_w1.yml launched via nohup ansible-playbook
-# ... &) actually started before the scenario moves on to chaos steps.
+# Inputs:  pidfile (required; absolute path); timeout (default 30 seconds).
 #
-# INPUTS:
-#   pidfile  REQUIRED.  Absolute path to the workload's pidfile (e.g. /tmp/w1-1a-db1.pid).
-#   timeout  OPTIONAL.  Default 30 seconds.
-#
-# RUN EXAMPLE:
-#   ansible-playbook toolbox/wait/wait_for_workload_started.yml \
-#       -e pidfile=/tmp/w1-1a-db1.pid
-##################################################################################################
+# Example: ansible-playbook toolbox/workloads/wait_for_workload_started.yml -e pidfile=/tmp/w1-1a-db1.pid
 
 - name: Wait for a background workload's pidfile to appear
   hosts: localhost

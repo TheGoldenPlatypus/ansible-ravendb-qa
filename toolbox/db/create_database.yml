@@ -1,23 +1,9 @@
-##################################################################################################
-# toolbox/db/create_database.yml
+# toolbox/db/create_database.yml -- create a database on the cluster reachable via cluster_leader.
 #
-# Creates a database on the cluster reachable via cluster_leader, using the ravendb.ravendb
-# `database` module.  Defaults to replication_factor=3 so all 3 nodes host it.
+# Inputs:  cluster_leader (any node in the cluster, e.g. 1a), db_name (required);
+#          replication_factor (default 3).
 #
-# INPUTS:
-#   cluster_leader      REQUIRED.  Container name of any node in the cluster (e.g. 1a).
-#   db_name             REQUIRED.  Database name to create.
-#   replication_factor  OPTIONAL.  Default 3.
-#
-# RUN EXAMPLES:
-#   # create Tenants on cluster 1 with default replication factor 3
-#   ansible-playbook toolbox/db/create_database.yml -K \
-#       -e cluster_leader=1a -e db_name=Tenants
-#
-#   # create a single-node DB
-#   ansible-playbook toolbox/db/create_database.yml -K \
-#       -e cluster_leader=1a -e db_name=MyTestDb -e replication_factor=1
-##################################################################################################
+# Example: ansible-playbook toolbox/db/create_database.yml -K -e cluster_leader=1a -e db_name=Tenants
 
 - ansible.builtin.import_playbook: ../_internal/ensure_ravendb_venv.yml
 

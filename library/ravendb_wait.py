@@ -1,4 +1,5 @@
 #!/usr/bin/python
+"""ravendb_wait -- Ansible module that polls a RavenDB cluster until a convergence condition holds."""
 
 import json
 import random
@@ -7,12 +8,8 @@ from urllib.parse import quote
 
 from ansible.module_utils.basic import AnsibleModule
 from ansible.module_utils.ravendb_client import (
-    orchestrator_for,
-    prefix_match,
     request,
     request_per_node,
-    stream_all_doc_ids,
-    with_node_tag,
 )
 from ansible.module_utils.polling import poll_until
 
@@ -32,80 +29,29 @@ def now_hms():
 
 
 def classify_nodes(p, nodes):
-    """Classify each probe node by whether it hosts the database.
+    """Probe each node's /stats and return (host_map, skipped); raise if any node is unreachable.
 
-    Strategy:
-      1. Look up the database's routing once via orchestrator_for():
-         non-sharded -> probe each node directly at /databases/<db>/stats
-         sharded     -> route every probe through the orchestrator with
-                        ?nodeTag=<X>; the orchestrator proxies to the
-                        named node.
-
-    Returns (host_map, skipped) where:
-      host_map[target] = None              for non-sharded reachable nodes
-      host_map[target] = ('via', orch_tgt) for sharded reachable nodes; the
-                                            tuple says "to read stats from
-                                            this node, send GET via orch_tgt
-                                            with ?nodeTag=<target tag>".
-      skipped: list of nodes that returned a non-200, non-410 response
-                (the db genuinely isn't there -- 404 etc).
-
-    Raises RuntimeError on:
-      - unreachable nodes (connection error, DNS, SSL)
-      - failed orchestrator lookup
-    -- because conflating those with "wrong cluster" is the root cause of
-    vacuous waits passing on dead clusters."""
+    host_map[target] is None for reachable nodes that host the database;
+    skipped holds nodes that returned a non-200.
+    """
     domain = p["ravendb_domain"]
     db = p["db_name"]
     if not nodes:
         return {}, []
 
-    # One lookup against the first node to determine the orchestrator.  If
-    # the db is sharded, every subsequent probe routes via that orchestrator.
-    # Defensive: if the lookup itself fails (transport / DNS / permission),
-    # default to non-sharded and let the per-node probe below surface the
-    # failure with the original ("X: %s" % body) error context -- callers
-    # rely on that shape for the "unreachable" assertion.
-    try:
-        orch = orchestrator_for(nodes[0], domain, db,
-                                p["client_cert"], p["ca_cert"])
-        is_sharded = (orch != nodes[0]) or _is_sharded(p, nodes[0])
-    except Exception:
-        orch = nodes[0]
-        is_sharded = False
-
     host_map = {}
     skipped = []
     unreachable = []
-
-    if not is_sharded:
-        path = "/databases/%s/stats" % db
-        results = request_per_node("GET", nodes, domain, path,
-                                   p["client_cert"], p["ca_cert"])
-        for target, status, body in results:
-            if status is None:
-                unreachable.append("%s: %s" % (target, body))
-            elif status == 200:
-                host_map[target] = None
-            else:
-                skipped.append(target)
-    else:
-        # Sharded: per-node calls go to the orchestrator with ?nodeTag=<tag>.
-        # Each probe verifies the proxy reaches the named node successfully.
-        base_path = "/databases/%s/stats" % db
-        for target in nodes:
-            tag = target[-1].upper()
-            path = with_node_tag(base_path, tag)
-            try:
-                s, _ = request("GET", orch, domain, path,
+    path = "/databases/%s/stats" % db
+    results = request_per_node("GET", nodes, domain, path,
                                p["client_cert"], p["ca_cert"])
-            except Exception as e:
-                unreachable.append("%s (via orch %s): %r" % (target, orch, e))
-                continue
-            if s == 200:
-                host_map[target] = ("via", orch)
-            else:
-                skipped.append(target)
+    for target, status, body in results:
+        if status is None:
+            unreachable.append("%s: %s" % (target, body))
+        elif status == 200:
+            host_map[target] = None
+        else:
+            skipped.append(target)
 
     if unreachable:
         raise RuntimeError(
@@ -116,42 +62,8 @@ def classify_nodes(p, nodes):
     return host_map, skipped
 
 
-def stats_request_for(target, host_map_value, db, suffix="stats"):
-    """Compose (call_target, url_path) for a /stats-family call against
-    `target` using the routing decision classify_nodes already made.
-
-    host_map_value is what classify_nodes stored:
-        None              -> non-sharded, call /databases/<db>/<suffix> on target
-        ("via", orch_tgt) -> sharded, call /databases/<db>/<suffix>?nodeTag=<X>
-                             on orch_tgt where X = target's cluster tag
-
-    Callers send the resulting (call_target, path) via request() instead of
-    hand-rolling the URL composition (which previously had per-shard logic)."""
-    base = "/databases/%s/%s" % (db, suffix)
-    if host_map_value is None:
-        return target, base
-    _, orch_target = host_map_value
-    tag = target[-1].upper()
-    return orch_target, with_node_tag(base, tag)
-
-
-def _is_sharded(p, target):
-    """Best-effort: tell whether `target`'s DB record reports sharding.
-    Used as a tie-break when orchestrator_for returned target unchanged
-    (which can happen for non-sharded OR for sharded-where-target-is-the-
-    orchestrator -- both legitimate)."""
-    s, b = request("GET", target, p["ravendb_domain"],
-                   "/admin/databases?name=%s" % p["db_name"],
-                   p["client_cert"], p["ca_cert"])
-    if s != 200:
-        return False
-    shards = ((json.loads(b).get("Sharding") or {}).get("Shards")) or {}
-    return bool(shards)
-
-    return host_map, skipped
-
-
 def k_leader(p):
+    """Wait until the cluster has a leader (matching `expected_leader` tag if given)."""
     target = p["target"]
     timeout = p["timeout"]
     expected = (p["expected_leader"] or "").upper()
@@ -181,6 +93,7 @@ def k_leader(p):
 
 
 def k_member(p):
+    """Wait until `target_tag` is a full Member (not Promotable or Rehab) of the database."""
     cluster_leader = p["cluster_leader"]
     db = p["db_name"]
     target = p["target"]
@@ -189,22 +102,6 @@ def k_member(p):
     path = "/admin/databases?name=%s" % db
 
     def gather(record):
-        sharding = record.get("Sharding") or {}
-        shards = sharding.get("Shards") or {}
-        if shards:
-            orch = (sharding.get("Orchestrator") or {}).get("Topology") or {}
-            members_seen = set()
-            promotables_seen = set()
-            rehabs_seen = set()
-            for entry in (orch,) + tuple(shards.values()):
-                members_seen.update(entry.get("Members") or [])
-                promotables_seen.update(entry.get("Promotables") or [])
-                rehabs_seen.update(entry.get("Rehabs") or [])
-            return (sorted(members_seen),
-                    sorted(promotables_seen),
-                    sorted(rehabs_seen),
-                    "sharded(orch+%d shards)" % len(shards))
-
         flat = record.get("Topology") or {}
         return (list(flat.get("Members") or []),
                 list(flat.get("Promotables") or []),
@@ -237,6 +134,7 @@ def k_member(p):
 
 
 def k_rehab(p):
+    """Wait until `target_tag` enters Promotables or Rehabs of the database."""
     cluster_leader = p["cluster_leader"]
     db = p["db_name"]
     target = p["target"]
@@ -269,68 +167,34 @@ def k_rehab(p):
 
 
 def snapshot_stats_field(p, nodes_or_map, field):
-    """Sample `field` from /stats on every node in nodes_or_map.
-
-    HARDENED: every probed node must respond 200, and the field must be
-    present in the response.  Any HTTP failure, connection error, or missing
-    field raises RuntimeError -- silently dropping failed nodes from the
-    snapshot is the bug that lets `all(prev.get(n) == current.get(n) for n in
-    has_db)` become vacuously True on `snap == {}` and pass a wait against a
-    dead cluster.
-
-    Returns a dict {target: field_value} where field_value may be a value the
-    server returned (including legitimate None if the field is actually null
-    -- but field absence is reported separately as a failure).
-    """
-    db = p["db_name"]
+    """Return {target: field_value} sampling `field` from /stats on every node; raise on any failure."""
     snap = {}
     failures = []
-
-    if isinstance(nodes_or_map, dict):
-        for target, route_marker in nodes_or_map.items():
-            call_target, path = stats_request_for(target, route_marker, db)
-            try:
-                s, b = request("GET", call_target, p["ravendb_domain"], path,
+    targets = list(nodes_or_map)
+    path = "/databases/%s/stats" % p["db_name"]
+    results = request_per_node("GET", targets, p["ravendb_domain"], path,
                                p["client_cert"], p["ca_cert"])
-            except Exception as e:
-                failures.append("%s: connection error %r" % (target, e))
-                continue
-            if s != 200:
-                failures.append("%s: HTTP %d" % (target, s))
-                continue
-            data = json.loads(b)
-            if field not in data:
-                failures.append("%s: response has no '%s' field" % (target, field))
-                continue
-            snap[target] = data[field]
-    else:
-        # legacy plain-list path -- non-sharded only
-        path = "/databases/%s/stats" % db
-        results = request_per_node("GET", nodes_or_map, p["ravendb_domain"], path,
-                                   p["client_cert"], p["ca_cert"])
-        for target, status, body in results:
-            if status is None:
-                failures.append("%s: connection error %s" % (target, body))
-                continue
-            if status != 200:
-                failures.append("%s: HTTP %d" % (target, status))
-                continue
-            data = json.loads(body)
-            if field not in data:
-                failures.append("%s: response has no '%s' field" % (target, field))
-                continue
-            snap[target] = data[field]
+    for target, status, body in results:
+        if status is None:
+            failures.append("%s: connection error %s" % (target, body))
+            continue
+        if status != 200:
+            failures.append("%s: HTTP %d" % (target, status))
+            continue
+        data = json.loads(body)
+        if field not in data:
+            failures.append("%s: response has no '%s' field" % (target, field))
+            continue
+        snap[target] = data[field]
 
     if failures:
         raise RuntimeError(
             "snapshot_stats_field('%s') failed on %d/%d node(s): %s -- "
             "can't proceed with a wait on partial coverage (would silently "
             "PASS via all([])==True against a dead cluster)"
-            % (field, len(failures), len(nodes_or_map), failures))
+            % (field, len(failures), len(targets), failures))
 
     if not snap:
-        # Defensive: nodes_or_map was empty AND no failures.  The classify_nodes
-        # guard upstream should already block this, but never trust.
         raise RuntimeError(
             "snapshot_stats_field('%s'): 0 nodes contributed data -- "
             "vacuous PASS would be a silent false negative" % field)
@@ -339,6 +203,7 @@ def snapshot_stats_field(p, nodes_or_map, field):
 
 
 def k_etag_parity(p):
+    """Wait until LastDatabaseEtag stops changing across all nodes that host the database."""
     nodes = p["nodes"]
     timeout = p["timeout"]
     interval = p["poll_interval"]
@@ -355,9 +220,6 @@ def k_etag_parity(p):
         current = snapshot_stats_field(p, has_db, "LastDatabaseEtag")
         current_time = now_hms()
         if not has_db:
-            # defense in depth: classify_nodes already raises if has_db is
-            # empty, but if any future caller bypasses that, refuse to PASS
-            # via all([])==True.
             raise RuntimeError("k_etag_parity: has_db is empty -- vacuous PASS guard")
         if prev is None:
             prev = current
@@ -392,6 +254,7 @@ def k_etag_parity(p):
 
 
 def k_docs_drain(p):
+    """Wait until DatabaseChangeVector stops changing across all nodes that host the database."""
     nodes = p["nodes"]
     timeout = p["timeout"]
     interval = p["poll_interval"]
@@ -442,6 +305,7 @@ def k_docs_drain(p):
 
 
 def k_quiescence(p):
+    """Wait until every node agrees on a single non-empty DatabaseChangeVector."""
     nodes = p["nodes"]
     timeout = p["timeout"]
     interval = p["poll_interval"]
@@ -454,8 +318,6 @@ def k_quiescence(p):
         current = snapshot_stats_field(p, has_db, "DatabaseChangeVector")
         if not current:
             raise RuntimeError("k_quiescence: snapshot is empty -- vacuous PASS guard")
-        # Reject 'all None / all empty string' as a false convergence: that
-        # means every node returned a missing/empty CV, not that they agree.
         if all((v is None or v == "") for v in current.values()):
             raise RuntimeError(
                 "k_quiescence: every node returned a missing/empty "
@@ -481,6 +343,7 @@ def k_quiescence(p):
 
 
 def k_stats_field_parity(p):
+    """Wait until the given /stats `fields` match across all nodes that host the database."""
     nodes = p["nodes"]
     fields = p["fields"] or ["CountOfTombstones"]
     timeout = p["timeout"]
@@ -525,6 +388,7 @@ def k_stats_field_parity(p):
 
 
 def k_conflicts_resolved(p):
+    """Wait until every node reports zero replication conflicts."""
     nodes = p["nodes"]
     timeout = p["timeout"]
     interval = p["poll_interval"]
@@ -536,7 +400,7 @@ def k_conflicts_resolved(p):
     path = "/databases/%s/replication/conflicts" % p["db_name"]
 
     def predicate():
-        targets = list(has_db.keys()) if isinstance(has_db, dict) else has_db
+        targets = list(has_db)
         results = request_per_node("GET", targets, p["ravendb_domain"], path,
                                    p["client_cert"], p["ca_cert"])
         counts = {}
@@ -552,9 +416,6 @@ def k_conflicts_resolved(p):
             counts[target] = data.get("TotalResults", len(data.get("Results") or []))
 
         if failures:
-            # Don't pretend a network error is 'conflicts still present' --
-            # that masks unreachable nodes as 'not converged' and burns the
-            # entire timeout budget.  Raise loud immediately.
             raise RuntimeError(
                 "k_conflicts_resolved: %d/%d node(s) failed during conflict "
                 "probe: %s -- can't verify resolution on partial coverage"
@@ -581,6 +442,7 @@ def k_conflicts_resolved(p):
 
 
 def k_marker_propagation(p):
+    """PUT a marker doc on `source` and wait until it appears on every target."""
     source = p["source"]
     targets = p["targets"]
     db = p["db_name"]
@@ -607,11 +469,6 @@ def k_marker_propagation(p):
         unreachable = []
         for target, status, body in results:
             if status is None:
-                # Connection error.  We're polling, so it MIGHT recover, but
-                # if every retry sees the same network failure we'd spin to
-                # timeout and misattribute the cause as 'marker did not
-                # propagate'.  Raise loud now -- a wait kind running against
-                # a dead target is meaningless.
                 unreachable.append("%s: %s" % (target, body))
                 continue
             if status == 200:
@@ -635,118 +492,6 @@ def k_marker_propagation(p):
             "(took %.1fs)" % (marker_id, targets, source, elapsed))
 
 
-def k_doc_count_match(p):
-    src_target = p["source"]
-    src_db     = p["db_name"]
-    tgt_target = p["target"]
-    tgt_db     = p["target_db_name"] or src_db
-    timeout    = p["timeout"]
-
-    def _aggregate_count(target, db):
-        """Return CountOfDocuments for `db` on the cluster reachable via
-        `target`.  Sharded DBs use /stats/essential on the orchestrator
-        (server-side fan-out + aggregation); non-sharded use /stats.
-
-        Step 1 looks up the orchestrator.  If that fails we default to
-        `target` and let step 2 surface the underlying transport error so
-        the message keeps its "top-level /stats unreachable" shape that
-        callers (and tests) rely on."""
-        try:
-            orch = orchestrator_for(target, p["ravendb_domain"], db,
-                                    p["client_cert"], p["ca_cert"])
-        except Exception:
-            orch = target
-        path = "/databases/%s/stats/essential" % db
-        try:
-            status, body = request("GET", orch, p["ravendb_domain"], path,
-                                   p["client_cert"], p["ca_cert"])
-        except Exception as e:
-            raise RuntimeError(
-                "_aggregate_count: %s/%s top-level /stats unreachable: %r"
-                % (target, db, e))
-        if status != 200:
-            raise RuntimeError(
-                "_aggregate_count: %s/%s /stats/essential via %s HTTP %d"
-                % (target, db, orch, status))
-        return json.loads(body).get("CountOfDocuments")
-
-    def predicate():
-        s = _aggregate_count(src_target, src_db)
-        t = _aggregate_count(tgt_target, tgt_db)
-        if s == t:
-            return True, "src=%d == tgt=%d" % (s, t)
-        return False, "src=%d  tgt=%d  diff=%d" % (s, t, s - t)
-
-    done, value, elapsed = poll_until(predicate, timeout=timeout, interval=3.0)
-    if not done:
-        raise RuntimeError(
-            "TIMEOUT after %.1fs -- %s/%s doc count never equalled %s/%s; last: %s" %
-            (elapsed, src_target, src_db, tgt_target, tgt_db, value))
-
-    return ("DOC COUNT MATCHED -- %s/%s == %s/%s (took %.1fs, %s)" %
-            (src_target, src_db, tgt_target, tgt_db, elapsed, value))
-
-
-def k_hub_sink_doc_set_converged(p):
-    hub_leader = p["hub_cluster_leader"]
-    sink_leader = p["sink_cluster_leader"]
-    db = p["db_name"]
-    allowed = p["allowed_prefixes"] or []
-    sink_local = p["sink_local_prefixes"] or []
-    timeout = p["timeout"]
-    interval = p["poll_interval"]
-    sample_cap = int(p["sample_cap"] or 25)
-
-    if not hub_leader or not sink_leader:
-        raise ValueError(
-            "kind=hub_sink_doc_set_converged requires `hub_cluster_leader` and `sink_cluster_leader`")
-    if not allowed:
-        raise ValueError(
-            "kind=hub_sink_doc_set_converged requires `allowed_prefixes` (hub->sink filter)")
-
-    def predicate():
-        hub_ids = set(stream_all_doc_ids(
-            hub_leader, p["ravendb_domain"], db, p["client_cert"], p["ca_cert"]))
-        sink_ids = set(stream_all_doc_ids(
-            sink_leader, p["ravendb_domain"], db, p["client_cert"], p["ca_cert"]))
-        expected_on_sink = {i for i in hub_ids if prefix_match(i, allowed)}
-        expected_on_hub  = {i for i in sink_ids if not prefix_match(i, sink_local)}
-        missing_on_sink = sorted(expected_on_sink - sink_ids)
-        missing_on_hub  = sorted(expected_on_hub - hub_ids)
-        if not missing_on_sink and not missing_on_hub:
-            return True, (len(hub_ids), len(sink_ids),
-                          len(expected_on_sink), len(expected_on_hub))
-        return False, (missing_on_sink, missing_on_hub)
-
-    done, value, elapsed = poll_until(predicate, timeout=timeout, interval=interval)
-    if not done:
-        missing_on_sink, missing_on_hub = value
-        lines = [
-            "TIMEOUT after %.1fs -- hub-sink doc-set never converged" % elapsed,
-            "  hub=%s  sink=%s  db=%s" % (hub_leader, sink_leader, db),
-            "  filter (hub->sink): %s" % allowed,
-            "  sink-local allowlist: %s" % (sink_local or "[]"),
-            "  MISSING on sink: %d" % len(missing_on_sink),
-            "  MISSING on hub:  %d" % len(missing_on_hub),
-        ]
-        if missing_on_sink:
-            lines.append("  missing-on-sink sample (first %d of %d): %s"
-                         % (min(sample_cap, len(missing_on_sink)),
-                            len(missing_on_sink),
-                            missing_on_sink[:sample_cap]))
-        if missing_on_hub:
-            lines.append("  missing-on-hub  sample (first %d of %d): %s"
-                         % (min(sample_cap, len(missing_on_hub)),
-                            len(missing_on_hub),
-                            missing_on_hub[:sample_cap]))
-        raise RuntimeError("\n".join(lines))
-
-    hub_n, sink_n, exp_sink, exp_hub = value
-    return ("CONVERGED -- hub-sink doc-set complete in %.1fs "
-            "(hub=%d, sink=%d, expected-on-sink=%d, expected-on-hub=%d)"
-            % (elapsed, hub_n, sink_n, exp_sink, exp_hub))
-
-
 KINDS = {
     "leader":              k_leader,
     "member":              k_member,
@@ -757,8 +502,6 @@ KINDS = {
     "stats_field_parity":  k_stats_field_parity,
     "conflicts_resolved":  k_conflicts_resolved,
     "marker_propagation":  k_marker_propagation,
-    "doc_count_match":     k_doc_count_match,
-    "hub_sink_doc_set_converged": k_hub_sink_doc_set_converged,
 }
 
 
@@ -779,16 +522,8 @@ def main():
         source=dict(default=None),
         targets=dict(type="list", elements="str", default=None),
         marker_id_prefix=dict(default=None),
-        # doc_count_match
-        target_db_name=dict(default=None),
         # stats_field_parity
         fields=dict(type="list", elements="str", default=None),
-        # hub_sink_doc_set_converged
-        hub_cluster_leader=dict(default=None),
-        sink_cluster_leader=dict(default=None),
-        allowed_prefixes=dict(type="list", elements="str", default=None),
-        sink_local_prefixes=dict(type="list", elements="str", default=None),
-        sample_cap=dict(type="int", default=None),
         # timing
         timeout=dict(type="int", default=60),
         poll_interval=dict(type="int", default=2),

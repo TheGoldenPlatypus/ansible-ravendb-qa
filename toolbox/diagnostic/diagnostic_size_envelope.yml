@@ -1,25 +1,12 @@
-##################################################################################################
-# toolbox/diagnostic/diagnostic_size_envelope.yml
+# toolbox/diagnostic/diagnostic_size_envelope.yml -- capture or check SizeOnDisk per node.
+# Captures a baseline when baseline_file is missing; otherwise compares and prints growth %.
 #
-# Storage envelope check.  Two modes (auto-detected by whether baseline_file exists):
-#   1. CAPTURE -- baseline_file missing.  Records current SizeOnDisk per node, writes the file.
-#   2. CHECK   -- baseline_file exists.  Compares current sizes; prints per-node growth %.
+# Inputs:  db_name, nodes, baseline_file (required, absolute path); max_growth_pct (optional,
+#          default 300, per-node growth ceiling when asserting); assert_mode (optional, default false).
 #
-# By default (assert_mode=false) this is info-only -- growth is just printed.  Pass
-# assert_mode=true to fail when any node's growth > max_growth_pct.
-#
-# INPUTS:
-#   db_name           REQUIRED.
-#   nodes             REQUIRED.
-#   baseline_file     REQUIRED.  Absolute path.
-#   max_growth_pct    OPTIONAL.  Default 300.  Per-node growth ceiling (only matters when asserting).
-#   assert_mode       OPTIONAL.  Default false.
-#
-# RUN EXAMPLE:
-#   ansible-playbook toolbox/diagnostic/diagnostic_size_envelope.yml \
-#       -e db_name=db1 -e baseline_file=$PWD/captures/size-baseline-rv1.json \
-#       -e '{"nodes":["1a","1b","1c"]}'
-##################################################################################################
+# Example: ansible-playbook toolbox/diagnostic/diagnostic_size_envelope.yml \
+#              -e db_name=db1 -e baseline_file=$PWD/captures/size-baseline.json \
+#              -e '{"nodes":["1a","1b","1c"]}'
 
 - name: Storage envelope -- capture-or-check
   hosts: localhost

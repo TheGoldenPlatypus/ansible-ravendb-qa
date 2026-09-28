@@ -1,18 +1,8 @@
-##################################################################################################
-# toolbox/workloads/stop_workload.yml
+# toolbox/workloads/stop_workload.yml -- stop a background workload via its pidfile (SIGTERM, grace, SIGKILL, remove pidfile).
 #
-# Stop a background workload via its pidfile -- SIGTERM, brief grace window, SIGKILL,
-# then remove the pidfile.  Idempotent: a no-op if the pidfile is already gone (workload
-# exited naturally on its own duration).
+# Inputs:  pidfile (required; absolute path); grace_secs (default 2).
 #
-# INPUTS:
-#   pidfile     REQUIRED.  Absolute path to the workload's pidfile.
-#   grace_secs  OPTIONAL.  Default 2.  Seconds between TERM and KILL.
-#
-# RUN EXAMPLE:
-#   ansible-playbook toolbox/workloads/stop_workload.yml \
-#       -e pidfile=/tmp/w1-1a-db1.pid
-##################################################################################################
+# Example: ansible-playbook toolbox/workloads/stop_workload.yml -e pidfile=/tmp/w1-1a-db1.pid
 
 - name: Stop a background workload via its pidfile
   hosts: localhost

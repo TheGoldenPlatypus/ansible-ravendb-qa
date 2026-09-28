@@ -1,26 +1,8 @@
-##################################################################################################
-# toolbox/network/heal_all.yml
+# toolbox/network/heal_all.yml -- flush every chaos REJECT/DROP iptables rule from every node.
 #
-# Flushes every chaos iptables rule from every node in one shot.  Unlike heal_node.yml (which
-# only removes rules for cluster-peers discovered via /cluster/topology), heal_all sweeps the
-# INPUT and OUTPUT chains for every REJECT or DROP rule and deletes them all -- which is what
-# you actually want after a partition_set chaos run, because those rules can span cluster
-# boundaries that no single node's topology knows about.
+# Inputs:  targets (optional; JSON list overriding auto-discovery, e.g. '["1a","2b"]').
 #
-#
-# INPUTS:
-#   targets  OPTIONAL.  JSON list overriding auto-discovery (e.g. '["1a","2b"]').
-#
-# RUN EXAMPLES:
-#   # docker -- heal every container on the lab network
-#   ansible-playbook toolbox/network/heal_all.yml
-#
-#   # ssh -- heal every inventory host
-#   ansible-playbook -i inventory/ssh_hosts.yml toolbox/network/heal_all.yml -K
-#
-#   # surgical override -- heal only these two
-#   ansible-playbook toolbox/network/heal_all.yml -e '{"targets":["1a","1b"]}'
-##################################################################################################
+# Example: ansible-playbook toolbox/network/heal_all.yml
 
 - name: Flush every chaos iptables rule from every node
   hosts: localhost

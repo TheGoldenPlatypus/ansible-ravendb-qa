@@ -1,92 +1,28 @@
-##################################################################################################
 # playbooks/add_node.yml
 #
-# Provisions ONE new container, installs RavenDB on it, and OPTIONALLY joins it as a Member
-# to an existing cluster.  Use this to grow a cluster mid-test, add a standalone node with
-# a different RavenDB version, or chaos-test "what happens when a new node joins live."
+# Provisions one new container, installs RavenDB on it, and optionally joins it
+# to an existing cluster as a Member.
 #
-# What it does, in order:
-#   1. Validates node_name and computes the effective node tag.
-#   2. Launches the new docker container on the shared network.
-#   3. Refreshes the /etc/hosts ANSIBLE MANAGED CHAOS LAB block on the controller AND inside
-#      every existing container, so <new-node>.<ravendb_domain> resolves everywhere.
-#   4. Optionally pre-stages a custom RavenDB build on the new node (custom_build).
-#   5. Installs RavenDB on the new node only.
-#   6. If join_to is set: waits for the new node to come up, then joins it to the leader
-#      named by join_to as a Member.  If join_to is NOT set: stops here, leaves the node
-#      as a standalone single-node cluster.
+# What it does:
+#   1. Validates node_name and computes the node tag.
+#   2. Launches the new container on the shared network.
+#   3. Rebuilds the /etc/hosts block on the controller and every container.
+#   4. Optionally pre-stages a custom RavenDB build (custom_build).
+#   5. Installs RavenDB on the new node.
+#   6. If join_to is set, waits for the node then joins it as a Member.
 #   7. Prints the build version of the new node.
 #
-# INPUTS:
-#   node_name      REQUIRED.  Any container name (e.g. 1d, xyz3, custom_42).  Must not
-#                  already exist on the docker network.
-#   rdb_version    OPTIONAL.  RavenDB version to install.  Defaults to group_vars rdb_version.
-#   custom_build   OPTIONAL.  Path or URL to a custom .deb.  Requires --skip-tags download.
-#   join_to        OPTIONAL.  Container name of the leader to join (e.g. join_to=1a).
-#                  If omitted, the new node stays standalone -- no cluster join is attempted.
-#   node_tag       OPTIONAL.  Single-letter cluster tag for the new node (e.g. D).
-#                  Defaults to the last char of node_name (if a single lowercase letter,
-#                  uppercased), else 'A'.  Override when node_name doesn't end in a letter
-#                  AND you're joining a cluster (the tag must be unique within that cluster).
-#   passive        OPTIONAL (default false).  When true AND join_to is not set, skip the
-#                  admin-cert registration so the node stays in passive state and can be
-#                  added to a cluster manually later (e.g. via Studio).  Access Studio on
-#                  the new node via its setup wizard (no client cert required while passive).
-#   container_memory OPTIONAL.  cgroup memory cap for the new container (default 2500m).
+# Inputs:
+#   node_name        REQUIRED. Container name.
+#   rdb_version      OPTIONAL. RavenDB version to install.
+#   custom_build     OPTIONAL. Path or URL to a custom .deb (requires --skip-tags download).
+#   join_to          OPTIONAL. Container name of the leader to join.
+#   node_tag         OPTIONAL. Single-letter cluster tag for the new node.
+#   passive          OPTIONAL (default false). Leave the node passive when not joining.
+#   container_memory OPTIONAL. Memory cap for the new container (default 2500m).
 #
-# RUN EXAMPLES:
-#
-#   # TEST 1 -- standalone bootstrapped 1-node cluster.
-#   # Good for: quickly getting a fresh node with admin access, to poke at it via Studio
-#   # or to start writing docs immediately.  Node comes up as its own cluster tag A.
-#   ansible-playbook playbooks/add_node.yml -K -e node_name=solo1
-#
-#   # TEST 2 -- standalone PASSIVE (not bootstrapped, no cluster identity).
-#   # Good for: provisioning a node you intend to later add to an existing cluster
-#   # MANUALLY via Studio (the "Add Node" flow on the destination cluster).
-#   # Browse https://<node>.hubsink.test/ to see the setup wizard.
-#   ansible-playbook playbooks/add_node.yml -K -e node_name=xyz3 -e passive=true
-#
-#   # TEST 3 -- grow cluster 1 with a 4th node (convention-following name).
-#   # Good for: scaling an existing cluster.  Tag D is auto-derived from 'd' in '1d'.
+# Run:
 #   ansible-playbook playbooks/add_node.yml -K -e node_name=1d -e join_to=1a
-#
-#   # TEST 4 -- non-convention name + explicit tag, joining cluster 1's leader.
-#   # Good for: when the convention name doesn't fit (e.g. a memorable name for a chaos
-#   # node) but you still want it inside an existing cluster with a tag you choose.
-#   ansible-playbook playbooks/add_node.yml -K \
-#       -e node_name=myextra \
-#       -e join_to=1a \
-#       -e node_tag=E
-#
-#   # TEST 5 -- standalone bootstrapped node from a custom .deb (local file).
-#   # Good for: chaos-testing a developer branch build before it ships.  Skip-tags
-#   # tells the upstream role NOT to wipe and re-download our pre-staged .deb.
-#   # Tip: prime /tmp with a local .deb once and reuse it across runs to avoid S3:
-#   #   curl -L -o /tmp/ravendb-7.2.2.deb \
-#   #     "https://daily-builds.s3.amazonaws.com/ravendb_7.2.2-0_ubuntu.22.04_amd64.deb"
-#   ansible-playbook playbooks/add_node.yml -K \
-#       -e node_name=customsolo \
-#       -e custom_build=/tmp/ravendb-7.2.2.deb \
-#       --skip-tags download
-#
-#   # TEST 6 -- custom .deb + join an existing cluster.
-#   # Good for: dropping a dev-branch node directly into a running cluster (mid-test).
-#   # Combines custom_build (skip-tags download) with join_to + explicit tag.
-#   ansible-playbook playbooks/add_node.yml -K \
-#       -e node_name=customjoin \
-#       -e custom_build=/tmp/ravendb-7.2.2.deb \
-#       -e join_to=1a \
-#       -e node_tag=F \
-#       --skip-tags download
-#
-# NOTES:
-#   * Requires sudo (-K) because it edits /etc/hosts on the controller.
-#   * The new node is always joined as a Member (never a Promotable or Watcher).
-#   * RavenDB Free license caps clusters at 3 nodes.  Adding a 4th to a Free-licensed
-#     cluster will fail with a licensing error at join time.
-#   * Standalone nodes (no join_to) come up as their own 1-node cluster with tag 'A'.
-##################################################################################################
 
 
 - name: Provision the new container
@@ -128,8 +64,6 @@
         networks:
           - name: "{{ docker_network_name }}"
         networks_cli_compatible: true
-        # community.docker >=4.0 dropped purge_networks; the equivalent is
-        # comparisons.networks=strict (drop any extra networks not listed above).
         comparisons:
           networks: strict
         volumes:

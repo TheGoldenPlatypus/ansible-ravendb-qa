@@ -1,26 +1,10 @@
-##################################################################################################
-# toolbox/writes/write_docs_interleaved.yml
+# toolbox/writes/write_docs_interleaved.yml -- write N docs to a target node, round-robin through a list of id prefixes.
 #
-# Writes N docs to a target node, round-robin through a list of id prefixes.
-# Useful when a scenario wants two (or more) categories of docs arriving as a single
-# interleaved stream -- e.g. chaos tests that need filter-matching and non-matching docs
-# mixed in the same write burst.
+# Doc ids: for n in 0..count-1, <prefixes[n % len]>-<n // len>. With prefixes=["A","B"], count=4: A-0, B-0, A-1, B-1.
 #
-# DOC IDS:
-#   For n in 0..count-1:  <prefixes[ n % len(prefixes) ]>-<n // len(prefixes)>
-#   With prefixes=["A","B"] and count=4 you get:  A-0, B-0, A-1, B-1
+# Inputs:  target, db_name, count, prefixes (required; prefixes is a list of id prefixes).
 #
-# INPUTS:
-#   target    REQUIRED.
-#   db_name   REQUIRED.
-#   count     REQUIRED.
-#   prefixes  REQUIRED.  List of id prefixes; rotates in order.
-#
-# RUN EXAMPLE:
-#   ansible-playbook toolbox/writes/write_docs_interleaved.yml \
-#       -e target=1a -e db_name=Tenants -e count=20 \
-#       -e '{"prefixes":["tenants/cluster2/x","other/x"]}'
-##################################################################################################
+# Example: ansible-playbook toolbox/writes/write_docs_interleaved.yml -e target=1a -e db_name=Tenants -e count=20 -e '{"prefixes":["tenants/cluster2/x","other/x"]}'
 
 - name: Write N docs round-robin across prefixes
   hosts: localhost

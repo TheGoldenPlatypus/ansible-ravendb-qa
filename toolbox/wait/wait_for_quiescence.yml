@@ -1,21 +1,11 @@
-##################################################################################################
-# toolbox/wait/wait_for_quiescence.yml
+# toolbox/wait/wait_for_quiescence.yml -- wait until every node's DatabaseChangeVector
+# (from /stats) is identical.
 #
-# Waits until replication is fully caught up across a set of nodes -- defined as "every
-# node's DatabaseChangeVector (from /stats) is identical".  Nodes returning non-200 are
-# dropped from the convergence set on first probe.
+# Inputs:  db_name, nodes (required, JSON list of the cluster to converge); timeout_secs
+#          (optional, default 180); poll_interval (optional, default 2).
 #
-# INPUTS:
-#   db_name        REQUIRED.
-#   nodes          REQUIRED.  JSON list of node names.  Pass exactly the cluster you want
-#                             to converge -- a multi-cluster lab would otherwise try to
-#                             match CVs across independent clusters and never settle.
-#   timeout_secs   OPTIONAL.  Default 180.  (NOT `timeout` -- reserved Ansible variable name.)
-#   poll_interval  OPTIONAL.  Default 2.
-#
-# RUN EXAMPLE:
-#   ansible-playbook toolbox/wait/wait_for_quiescence.yml -e db_name=Tenants -e '{"nodes":["1a","1b","1c"]}'
-##################################################################################################
+# Example: ansible-playbook toolbox/wait/wait_for_quiescence.yml \
+#              -e db_name=Tenants -e '{"nodes":["1a","1b","1c"]}'
 
 - name: Wait until every node's DatabaseChangeVector matches
   hosts: localhost

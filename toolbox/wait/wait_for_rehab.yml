@@ -1,25 +1,12 @@
-##################################################################################################
-# toolbox/wait/wait_for_rehab.yml
+# toolbox/wait/wait_for_rehab.yml -- wait until a target node enters database-level rehab
+# (appears in Rehabs or Promotables).
 #
-# Waits until a target node enters database-level rehab (appears in Rehabs or Promotables of
-# /admin/databases?name=<db>).  Use immediately after a chaos action that should kick a node
-# out of Member state.
+# Inputs:  cluster_leader (any node e.g. 1a), db_name, target (node expected to enter rehab
+#          e.g. 1b) (required); target_tag (optional, override the auto-derived tag);
+#          timeout_secs (optional, default 120).
 #
-# Fails (intentionally) if the target never leaves Member state within the timeout -- that
-# means the chaos action didn't destabilise the node and the test isn't exercising the rehab
-# code path.  Pair with toolbox/wait/wait_for_member.yml to wait for rehab to complete.
-#
-# INPUTS:
-#   cluster_leader  REQUIRED.  Container name of any node in the cluster (e.g. 1a).
-#   db_name         REQUIRED.
-#   target          REQUIRED.  Node we expect to enter rehab (e.g. 1b).  Cluster tag derived
-#                              as upper(target[-1]) by convention.
-#   target_tag      OPTIONAL.  Override the auto-derived tag.
-#   timeout_secs    OPTIONAL.  Default 120.
-#
-# RUN EXAMPLE:
-#   ansible-playbook toolbox/wait/wait_for_rehab.yml -e cluster_leader=1a -e db_name=Tenants -e target=1b
-##################################################################################################
+# Example: ansible-playbook toolbox/wait/wait_for_rehab.yml \
+#              -e cluster_leader=1a -e db_name=Tenants -e target=1b
 
 - name: Wait until target enters rehab
   hosts: localhost

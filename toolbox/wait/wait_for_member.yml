@@ -1,24 +1,12 @@
-##################################################################################################
-# toolbox/wait/wait_for_member.yml
+# toolbox/wait/wait_for_member.yml -- wait until a target node is a full Member of its database
+# topology (in Members, not in Promotables or Rehabs).
 #
-# Waits until a target node is a full Member of its cluster's database topology
-# (present in Members, absent from Promotables and Rehabs) on /admin/databases?name=<db>.
-# Use after a chaos action has been undone to confirm the rehab phase actually finished
-# before measuring post-recovery state.
+# Inputs:  cluster_leader (any node to query e.g. 1a), db_name, target (node expected to become
+#          Member e.g. 1b) (required); target_tag (optional, override the auto-derived cluster
+#          tag); timeout_secs (optional, default 300).
 #
-# Pairs with toolbox/wait/wait_for_rehab.yml.
-#
-# INPUTS:
-#   cluster_leader  REQUIRED.  Container name of any node in the cluster to query (e.g. 1a).
-#   db_name         REQUIRED.  Database name whose topology we inspect.
-#   target          REQUIRED.  Node we expect to become Member (e.g. 1b).  Its cluster tag is
-#                              derived as upper(target[-1]) by convention.
-#   target_tag      OPTIONAL.  Override the auto-derived tag (e.g. target=myextra needs E).
-#   timeout_secs    OPTIONAL.  Default 300.
-#
-# RUN EXAMPLE:
-#   ansible-playbook toolbox/wait/wait_for_member.yml -e cluster_leader=1a -e db_name=Tenants -e target=1b
-##################################################################################################
+# Example: ansible-playbook toolbox/wait/wait_for_member.yml \
+#              -e cluster_leader=1a -e db_name=Tenants -e target=1b
 
 - name: Wait until target rejoins as full Member
   hosts: localhost

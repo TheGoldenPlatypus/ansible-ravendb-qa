@@ -1,38 +1,10 @@
 #!/usr/bin/python
-"""
-ravendb_diagnostic -- Ansible module exposing a registry of one-shot probes
-against a RavenDB cluster (or hub+sink mesh) used by the chaos / RPV-1 scenarios.
+"""ravendb_diagnostic -- Ansible module running one-shot diagnostic probes against a RavenDB cluster.
 
-Each probe is a "kind" dispatched through `KINDS[<name>](params)`.  Kinds are
-grouped below by category:
-
-    info-only:
-        doc_count, replication, schema_version, size_envelope,
-        supported_features
-
-    capture:
-        capture_cv, capture_doc_cv
-
-    parity (uniformity across nodes):
-        doc_count_parity, doc_id_set_parity, revision_count_parity,
-        extension_stats_parity, stats_parity
-
-    leak / orphan (something that should not be present):
-        orphan_revisions, scan_fltr, lane_inert, filter_compliance,
-        cross_sink_isolation
-
-    CV-shape (DatabaseChangeVector / per-doc CV structural checks):
-        stored_item_cv_split, cv_boundary_by_dbid, db_cv_order_side_only,
-        cross_cluster_cv_equality
-
-Each kind returns either a str or a list[str].  Whatever it returns becomes
-`result["msg"]` in the Ansible result.  When `assert_mode=true` and a check
-fails, the kind raises `DiagnosticViolation` and `main()` converts that into
+Each probe is a "kind" dispatched through `KINDS[<name>](params)` and returns
+a str or list[str] that becomes `result["msg"]`.  When `assert_mode=true` and a
+check fails, the kind raises `DiagnosticViolation` and `main()` converts it into
 `module.fail_json(msg=<lines>)`.
-
-PHASE-1 NOTE: this rewrite is readability only.  No check thresholds, output
-shapes, KINDS keys, or argument_spec keys were changed.  Bug-hunting / sharpening
-of false-positives is deferred to phase 2.
 """
 
 import json
@@ -43,19 +15,10 @@ from urllib.parse import quote
 
 from ansible.module_utils.basic import AnsibleModule
 from ansible.module_utils.ravendb_client import (
-    orchestrator_for,
-    prefix_match,
     request,
     request_per_node,
-    resolve_db_admin_route,
-    stream_all_doc_ids,
-    with_node_tag,
 )
 
-
-# ============================================================================
-# Module-level constants
-# ============================================================================
 
 # Stats fields rendered by the `stats_parity` table.
 _STATS_ALL_FIELDS = [
@@ -73,8 +36,7 @@ _STATS_DEFAULT_ASSERTED = [
     "CountOfTombstones", "CountOfUniqueAttachments",
 ]
 
-# CV entry regexes.  An entry looks like: `A:123-<dbid>` where A is a tag,
-# 123 an etag, and <dbid> a base64-ish identifier.
+# CV entry regexes for entries shaped like `A:123-<dbid>`.
 _CV_DBID_RE = re.compile(r"([A-Za-z0-9]+):\d+-([A-Za-z0-9+/=_\-]+)")
 _CV_ENTRY_FULL_RE = re.compile(r"([A-Za-z0-9]+):(\d+)-([A-Za-z0-9+/=_\-]+)")
 
@@ -86,13 +48,8 @@ _DOC_ID_PARITY_SETTLE_SECS = 2
 _ORPHAN_POLL_SECS = 2
 
 
-# ============================================================================
-# Assertion plumbing
-# ============================================================================
-
 class DiagnosticViolation(Exception):
-    """Raised by a kind when assert_mode=true AND a check failed.  Carries the
-    full diagnostic `lines` so main() can pass them to fail_json verbatim."""
+    """Raised by a kind when assert_mode is on and a check failed; carries the diagnostic lines."""
 
     def __init__(self, lines):
         self.lines = lines
@@ -100,9 +57,7 @@ class DiagnosticViolation(Exception):
 
 
 def violation(assert_mode, lines):
-    """If assert_mode is on, raise with `lines` carried as a list (so main() can
-    fail_json with a multi-line msg that Ansible debug renders nicely).
-    Otherwise return them so the handler can include them in its info output."""
+    """Raise DiagnosticViolation with `lines` when assert_mode is on, else return them."""
     if assert_mode:
         raise DiagnosticViolation(lines)
     return lines
@@ -117,200 +72,49 @@ def expand_id_set(p):
     raise ValueError("requires `ids` OR (`id_prefix` and `count`)")
 
 
-# ============================================================================
-# HTTP / stats helpers
-# ============================================================================
-
-def _stats_request_for(target, host_map_value, db, suffix="stats"):
-    """Compose (call_target, url_path) for a stats-family call against
-    `target` using the routing decision classify_nodes made.
-
-      None              -> non-sharded, direct call on target
-      ("via", orch)     -> sharded, route via orch with ?nodeTag=<tag>"""
-    base = "/databases/%s/%s" % (db, suffix)
-    if host_map_value is None:
-        return target, base
-    _, orch = host_map_value
-    tag = target[-1].upper()
-    return orch, with_node_tag(base, tag)
-
-
 def classify_nodes(p, nodes):
-    """Probe each node and return ({target: route_marker}, skipped).
-
-    route_marker:
-        None              -> non-sharded; call /databases/<db>/<x> on target
-        ("via", orch)     -> sharded; the orchestrator is `orch` and per-node
-                             calls go to orch with ?nodeTag=<target's tag>
-
-    A non-200 reply (other than the proxy success on the sharded path) lands
-    the target in `skipped`.  Returns the routing decision, not raw HTTP
-    codes -- the wait/diag callers use _stats_request_for() to compose URLs."""
+    """Probe each node's /stats and return ({target: None}, skipped)."""
     domain = p["ravendb_domain"]
     db = p["db_name"]
     if not nodes:
         return {}, []
 
-    # Single lookup to determine routing.  Defensive: if either the
-    # orchestrator lookup or the sharding check fails (transport, missing
-    # cert in unit tests, permission), default to non-sharded and let the
-    # per-node probes below surface any real failure.
-    try:
-        orch = orchestrator_for(nodes[0], domain, db,
-                                p["client_cert"], p["ca_cert"])
-    except Exception:
-        orch = nodes[0]
-
-    is_sharded = False
-    try:
-        s, b = request("GET", nodes[0], p["ravendb_domain"],
-                       "/admin/databases?name=%s" % db,
-                       p["client_cert"], p["ca_cert"])
-        if s == 200:
-            shards = ((json.loads(b).get("Sharding") or {}).get("Shards")) or {}
-            is_sharded = bool(shards)
-    except Exception:
-        pass
-
     host_map = {}
     skipped = []
-
-    if not is_sharded:
-        path = "/databases/%s/stats" % db
-        results = request_per_node("GET", nodes, domain, path,
-                                   p["client_cert"], p["ca_cert"])
-        for target, status, body in results:
-            if status == 200:
-                host_map[target] = None
-            else:
-                skipped.append(target)
-    else:
-        base_path = "/databases/%s/stats" % db
-        for target in nodes:
-            tag = target[-1].upper()
-            try:
-                s, _ = request("GET", orch, domain,
-                               with_node_tag(base_path, tag),
+    path = "/databases/%s/stats" % db
+    results = request_per_node("GET", nodes, domain, path,
                                p["client_cert"], p["ca_cert"])
-            except Exception:
-                skipped.append(target)
-                continue
-            if s == 200:
-                host_map[target] = ("via", orch)
-            else:
-                skipped.append(target)
-
+    for target, status, body in results:
+        if status == 200:
+            host_map[target] = None
+        else:
+            skipped.append(target)
     return host_map, skipped
 
 
-def get_stats(p, target, shard_id=None):
-    """Return parsed /stats dict for `target` (or None on failure).
-
-    Uses /stats (NOT /stats/essential) so DatabaseChangeVector + DatabaseId
-    are included -- capture_cv / cv_boundary_by_dbid rely on those fields,
-    and /stats/essential omits them.
-
-    On a sharded DB /stats requires nodeTag; we detect the "nodeTag is
-    mandatory" 500 and re-route via the orchestrator with ?nodeTag=<target's
-    tag>, so callers don't need to know whether the DB is sharded.
-
-    `shard_id` parameter is kept for backward-compat with callers that
-    explicitly want per-shard stats -- they should pass a route_marker
-    (("via", orch)) and the caller can use _stats_request_for() instead."""
+def get_stats(p, target):
+    """Return the parsed /stats dict for `target` (or None on failure)."""
     db = p["db_name"]
-    if shard_id is not None:
-        # Caller already knows the route_marker shape -- use it directly.
-        call_target, path = _stats_request_for(target, shard_id, db)
-        try:
-            status, body = request("GET", call_target, p["ravendb_domain"],
-                                   path, p["client_cert"], p["ca_cert"])
-        except Exception:
-            return None
-        return json.loads(body) if status == 200 else None
-
-    # First try plain /stats on the target.  Works directly for non-sharded
-    # DBs (and includes the DatabaseChangeVector / DatabaseId that the
-    # /stats/essential variant omitted).
     path = "/databases/%s/stats" % db
     try:
         status, body = request("GET", target, p["ravendb_domain"], path,
                                p["client_cert"], p["ca_cert"])
     except Exception:
         return None
-    if status == 200:
-        return json.loads(body)
-    # Sharded fallback: /stats on a sharded DB rejects calls without a
-    # nodeTag.  Re-route via the orchestrator carrying the target's tag.
-    if status == 500 and b"nodeTag is mandatory" in body:
-        try:
-            orch = orchestrator_for(target, p["ravendb_domain"], db,
-                                    p["client_cert"], p["ca_cert"])
-        except Exception:
-            return None
-        tag = target[-1].upper()
-        path = "/databases/%s/stats?nodeTag=%s" % (db, tag)
-        try:
-            status, body = request("GET", orch, p["ravendb_domain"], path,
-                                   p["client_cert"], p["ca_cert"])
-        except Exception:
-            return None
-        return json.loads(body) if status == 200 else None
-    return None
+    return json.loads(body) if status == 200 else None
 
 
 def per_node_field(p, nodes_or_map, field):
-    """Return {target: stats[field]} for each reachable node in nodes_or_map.
-
-    Accepts the dict produced by classify_nodes (route_marker per target)
-    or a plain list of node names (non-sharded only, direct /stats)."""
-    db = p["db_name"]
+    """Return {target: stats[field]} for each reachable node."""
     out = {}
-    if isinstance(nodes_or_map, dict):
-        for target, marker in nodes_or_map.items():
-            call_target, path = _stats_request_for(target, marker, db)
-            try:
-                s, b = request("GET", call_target, p["ravendb_domain"], path,
-                               p["client_cert"], p["ca_cert"])
-            except Exception:
-                continue
-            if s == 200:
-                out[target] = json.loads(b).get(field)
-        return out
-
-    path = "/databases/%s/stats" % db
-    results = request_per_node("GET", nodes_or_map, p["ravendb_domain"], path,
-                               p["client_cert"], p["ca_cert"])
+    path = "/databases/%s/stats" % p["db_name"]
+    results = request_per_node("GET", list(nodes_or_map), p["ravendb_domain"],
+                               path, p["client_cert"], p["ca_cert"])
     for target, status, body in results:
         if status == 200:
             out[target] = json.loads(body).get(field)
     return out
 
-
-# ============================================================================
-# CV parsing helpers
-# ============================================================================
-
-def parse_cv_entries(cv):
-    """Return list of (tag, dbid) tuples extracted from a CV string."""
-    return _CV_DBID_RE.findall(cv or "")
-
-
-def _parse_cv_set(cv_str):
-    """Return frozenset of (dbid, etag) for cross-cluster set-equality checks."""
-    if not cv_str:
-        return frozenset()
-    out = set()
-    for _tag, etag, dbid in _CV_ENTRY_FULL_RE.findall(cv_str):
-        try:
-            out.add((dbid, int(etag)))
-        except ValueError:
-            pass
-    return frozenset(out)
-
-
-# ============================================================================
-# Formatting helpers
-# ============================================================================
 
 def format_per_node(per_node, indent="  "):
     """Render a {name: value} dict as aligned `  name   value` lines."""
@@ -323,16 +127,8 @@ def format_per_node(per_node, indent="  "):
     return lines
 
 
-# ============================================================================
-# === Info-only kinds ========================================================
-# ============================================================================
-
 def k_doc_count(p):
-    """Single-node CountOfDocuments report.  Returns a one-line str.
-
-    Raises RuntimeError if /stats returns non-200 (db missing or node
-    unreachable) -- scenarios should fail loud, not silently print a soft
-    fallback message that callers might miss."""
+    """Return a one-line CountOfDocuments report for a single node."""
     target = p["target"]
     db = p["db_name"]
     stats = get_stats(p, target)
@@ -344,11 +140,7 @@ def k_doc_count(p):
 
 
 def k_replication(p):
-    """List incoming and outgoing active replication connections for `target`.
-
-    Returns list[str] -- a header + per-connection lines.  Raises RuntimeError
-    if /replication/active-connections returns non-200 (db missing or node
-    unreachable); scenarios should fail loud, not silently return a soft string."""
+    """List incoming and outgoing active replication connections for `target`."""
     target = p["target"]
     db = p["db_name"]
     path = "/databases/%s/replication/active-connections" % db
@@ -373,8 +165,8 @@ def k_replication(p):
 
 
 _REPL_TASK_TYPES = frozenset([
-    "Replication",                # OngoingTasks entry for external_replication
-    "ExternalReplication",        # alternate name some endpoints use
+    "Replication",
+    "ExternalReplication",
     "PullReplicationAsHub",
     "PullReplicationAsSink",
     "RavenEtl",
@@ -382,15 +174,7 @@ _REPL_TASK_TYPES = frozenset([
 
 
 def k_replication_health(p):
-    """Assert no replication-flavored ongoing task on `target/db` is stuck.
-
-    Hits /databases/<db>/tasks, filters OngoingTasks to replication types, and
-    fails (under assert_mode) when any task is Faulted, carries a non-empty
-    Error, or has TaskConnectionStatus=Reconnect at the moment of the check.
-    Callers should drain first; a sustained 'Reconnect' after a drain means
-    the task isn't progressing.
-
-    Returns list[str] -- a header + per-task line, with FAIL/PASS at the end."""
+    """Assert no replication-flavored ongoing task on `target/db` is Faulted, errored, or reconnecting."""
     target = p["target"]
     db = p["db_name"]
     assert_mode = bool(p["assert_mode"])
@@ -454,8 +238,6 @@ def k_schema_version(p):
     if unreachable:
         lines.append("  unreachable: %s" % unreachable)
 
-    # Fail loud when we couldn't read ANY node -- silently returning an empty
-    # version_map is a footgun (scenarios would print "(empty)" and continue).
     if not version_map:
         raise RuntimeError(
             "k_schema_version: no /build/version response from any node "
@@ -474,12 +256,7 @@ def k_schema_version(p):
 
 
 def k_supported_features(p):
-    """Report DatabaseRecord.SupportedFeatures for one db on one node.
-
-    Used after a rolling upgrade to confirm the new build's optional features
-    actually flipped on for the database (they only do once all nodes report
-    upgraded).  Returns one-line str.  Raises RuntimeError on non-200 (db
-    missing or node unreachable) -- fail loud."""
+    """Report DatabaseRecord.SupportedFeatures for one db on one node."""
     target = p["target"] or (p["nodes"] and p["nodes"][0])
     db = p["db_name"]
     if not target:
@@ -535,8 +312,6 @@ def k_size_envelope(p):
         base = int(baseline.get(target, 0))
         curr = sizes.get(target, 0)
         if base <= 0 and curr > 0:
-            # Fail loud: baseline=0 + current>0 means we can't compute % growth
-            # (would divide by zero) -- silently reporting 0% is a false negative.
             zero_baseline_with_growth.append(target)
             lines.append("  %-6s  baseline=%d  current=%d  growth=N/A (baseline=0)" %
                          (target, base, curr))
@@ -560,103 +335,6 @@ def k_size_envelope(p):
             max_growth_pct, over))
     return lines
 
-
-# ============================================================================
-# === Capture kinds ==========================================================
-# ============================================================================
-
-def k_capture_cv(p):
-    """Write each node's DatabaseChangeVector to `<output_dir>/<node>.cv`.
-
-    Returns a one-line str summary; used by scenarios to snapshot the cluster
-    CV state for later diffing."""
-    nodes = p["nodes"]
-    output_dir = p["output_dir"]
-    if not output_dir:
-        raise ValueError("kind=capture_cv requires `output_dir` (wrapper YAML resolves the default)")
-
-    os.makedirs(output_dir, exist_ok=True)
-
-    written = []
-    unreachable = []
-    for target in nodes:
-        stats = get_stats(p, target)
-        if stats is None:
-            # Unreachable: don't write a misleading "<UNAVAILABLE>" sentinel
-            # that looks like a captured value -- collect and raise below.
-            unreachable.append(target)
-            continue
-        # Empty CV is legit (DB has no docs yet) -- write empty line.
-        cv = stats.get("DatabaseChangeVector") or ""
-        path = os.path.join(output_dir, "%s.cv" % target)
-        with open(path, "w") as f:
-            f.write(cv + "\n")
-        written.append(target)
-
-    if unreachable:
-        raise RuntimeError(
-            "k_capture_cv: %s unreachable -- can't capture CV (captured %d/%d nodes)"
-            % (unreachable, len(written), len(nodes)))
-
-    return "captured DatabaseChangeVector for %d node(s) -> %s/" % (len(written), output_dir)
-
-
-def k_capture_doc_cv(p):
-    """Write per-(node, doc_id) document CV to `<output_dir>/<node>__<id>.cv`.
-
-    Returns a one-line str summary.  Missing/unreachable docs are recorded as
-    `<NOT_FOUND status=...>` rather than skipped, so the file set is uniform."""
-    nodes = p["nodes"]
-    ids = p["ids"] or []
-    db = p["db_name"]
-    output_dir = p["output_dir"]
-    if not ids:
-        raise ValueError("kind=capture_doc_cv requires `ids` (non-empty list)")
-    if not output_dir:
-        raise ValueError("kind=capture_doc_cv requires `output_dir` (wrapper YAML resolves the default)")
-
-    os.makedirs(output_dir, exist_ok=True)
-
-    pairs = 0
-    unreachable_nodes = set()
-    for target in nodes:
-        for doc_id in ids:
-            path = "/databases/%s/docs?id=%s" % (db, quote(doc_id))
-            try:
-                status, body = request("GET", target, p["ravendb_domain"], path,
-                                       p["client_cert"], p["ca_cert"])
-            except Exception:
-                # Connection refused / DNS / timeout -- mark the node and stop
-                # trying its remaining docs.  Raised below as a clean error.
-                unreachable_nodes.add(target)
-                break
-            if status == 200:
-                results = json.loads(body).get("Results") or []
-                if results:
-                    cv = (results[0].get("@metadata") or {}).get("@change-vector") or "<NO_CV>"
-                else:
-                    cv = "<NOT_FOUND status=%d>" % status
-            else:
-                cv = "<NOT_FOUND status=%d>" % status
-
-            safe_id = re.sub(r"[^A-Za-z0-9._-]", "_", doc_id)
-            out = os.path.join(output_dir, "%s__%s.cv" % (target, safe_id))
-            with open(out, "w") as f:
-                f.write(cv + "\n")
-            pairs += 1
-
-    if unreachable_nodes:
-        raise RuntimeError(
-            "k_capture_doc_cv: %s unreachable -- can't capture CV (captured %d pair(s) "
-            "across %d/%d nodes)" % (sorted(unreachable_nodes), pairs,
-                                     len(nodes) - len(unreachable_nodes), len(nodes)))
-
-    return "captured %d per-(node,id) CV file(s) -> %s/" % (pairs, output_dir)
-
-
-# ============================================================================
-# === Parity kinds ===========================================================
-# ============================================================================
 
 def k_doc_count_parity(p):
     """Assert every reachable node reports the same CountOfDocuments."""
@@ -689,9 +367,7 @@ def k_doc_id_set_parity(p):
     unreachable_nodes = set()
 
     def probe_all(ids):
-        """Returns {id: [status_per_node]}.  Connection errors on a node mark
-        it unreachable (collected in `unreachable_nodes`); we still produce a
-        statuses entry (None) so the per-id list stays aligned to `nodes`."""
+        """Return {id: [status_per_node]}, using None for a node's status on connection error."""
         out = {}
         for doc_id in ids:
             statuses = []
@@ -745,30 +421,14 @@ def k_doc_id_set_parity(p):
     return lines
 
 
-def _resolve_revisions_route(p, target):
-    return resolve_db_admin_route(
-        target, p["db_name"], p["ravendb_domain"],
-        p["client_cert"], p["ca_cert"],
-    )
-
-
 def k_revision_count_parity(p):
-    """Assert per-id revision counts agree across nodes (and equal `expected_count` if given).
-
-    Accepts both plain nodes (hit directly) and sharded leaders (auto-detected
-    via /admin/databases?name=<db>; per-id reads routed through the database's
-    orchestrator).  The output labels keep the caller's original target tag so
-    a sharded leader shows up as e.g. '1a' in the per-id table, not as the
-    orchestrator member we routed through internally."""
+    """Assert per-id revision counts agree across nodes (and equal `expected_count` if given)."""
     nodes = p["nodes"]
     db = p["db_name"]
     assert_mode = bool(p["assert_mode"])
     expected = p["expected_count"]
     page_size = int(p["page_size"] or 1024)
     probe_ids = expand_id_set(p)
-
-    # Resolve once per target so we don't pay an /admin/databases hit per probe id.
-    route_for = {t: _resolve_revisions_route(p, t) for t in nodes}
 
     id_counts = {}
     unreachable_nodes = set()
@@ -778,10 +438,9 @@ def k_revision_count_parity(p):
             if target in unreachable_nodes:
                 counts.append(None)
                 continue
-            route = route_for[target]
             path = "/databases/%s/revisions?id=%s&pageSize=%d" % (db, quote(doc_id), page_size)
             try:
-                status, body = request("GET", route, p["ravendb_domain"], path,
+                status, body = request("GET", target, p["ravendb_domain"], path,
                                        p["client_cert"], p["ca_cert"])
             except Exception:
                 unreachable_nodes.add(target)
@@ -824,102 +483,6 @@ def k_revision_count_parity(p):
 _FORM_EXPECT_CHOICES = ("any-raw", "all-split", "any-split", "all-raw")
 
 
-def k_revision_form_sampling(p):
-    """For each probe doc id, GET /databases/<db>/revisions?id=<id>&pageSize=N on
-    `target`, then classify every revision's @change-vector by form:
-
-        raw    -- no `delimiter` in the CV (legacy on-disk shape)
-        split  -- contains `delimiter` (new lane / hashed)
-
-    Aggregate per-id raw/split counts + overall totals, then assert per `expect`:
-
-        any-raw   -- at least one revision (across all ids) must be raw.
-                     Use after a SNAPSHOT restore of a mixed-form source to prove
-                     raw-CV revisions were preserved at the voron page level.
-        all-split -- every revision must be split.  Use after a SMUGGLER restore
-                     (the public-API import re-keys all revs into hashed form).
-        any-split -- at least one revision must be split.
-        all-raw   -- every revision must be raw (pure v_old baseline).
-
-    A probe id with zero returned revisions is reported as `missing` and fails
-    under assert_mode -- otherwise a smuggler restore that dropped all revisions
-    on a given doc would silently pass an `any-raw` / `all-split` check that
-    only looks at the rest of the probe set.
-
-    Returns list[str] -- per-id raw/split counts (first 10) + totals + PASS/FAIL.
-
-    Distinct from `stored_item_cv_split`: that kind checks the LIVE doc's CV
-    shape (one entry per id); this one walks every REVISION returned by
-    /revisions?id=..., which is what catches a per-revision-form regression."""
-    target = p["target"]
-    db = p["db_name"]
-    expect = p["expect"] or "any-raw"
-    delimiter = p["delimiter"] or "|"
-    page_size = int(p["page_size"] or 1024)
-    assert_mode = bool(p["assert_mode"])
-    probe_ids = expand_id_set(p)
-
-    if expect not in _FORM_EXPECT_CHOICES:
-        raise ValueError(
-            "kind=revision_form_sampling: expect must be one of %s (got %r)"
-            % (list(_FORM_EXPECT_CHOICES), expect))
-
-    per_id = {}
-    total_raw = 0
-    total_split = 0
-    missing = []
-
-    for doc_id in probe_ids:
-        path = "/databases/%s/revisions?id=%s&pageSize=%d" % (db, quote(doc_id), page_size)
-        s, b = request("GET", target, p["ravendb_domain"], path,
-                       p["client_cert"], p["ca_cert"])
-        if s != 200:
-            raise RuntimeError(
-                "%s/%s id=%s: /revisions returned HTTP %d -- db missing or node unreachable"
-                % (target, db, doc_id, s))
-        results = json.loads(b).get("Results") or []
-        if not results:
-            missing.append(doc_id)
-            per_id[doc_id] = (0, 0)
-            continue
-        raw_n = split_n = 0
-        for rev in results:
-            cv = (rev.get("@metadata") or {}).get("@change-vector") or ""
-            if delimiter in cv:
-                split_n += 1
-            else:
-                raw_n += 1
-        per_id[doc_id] = (raw_n, split_n)
-        total_raw += raw_n
-        total_split += split_n
-
-    lines = ["revision form sampling on %s/%s  (%d id(s), expect=%s):"
-             % (target, db, len(probe_ids), expect)]
-    for i, (rn, sn) in list(per_id.items())[:10]:
-        lines.append("  %-30s  raw=%-3d  split=%-3d" % (i, rn, sn))
-    lines.append("  totals: raw=%d  split=%d  missing(no-revs)=%d"
-                 % (total_raw, total_split, len(missing)))
-
-    if missing:
-        return violation(assert_mode, lines + [
-            "FAIL  %d id(s) returned no revisions: %s" % (len(missing), missing[:20])])
-
-    bad = None
-    if expect == "any-raw" and total_raw == 0:
-        bad = "expected any-raw but every revision is split"
-    elif expect == "all-split" and total_raw > 0:
-        bad = "expected all-split but %d revision(s) are raw" % total_raw
-    elif expect == "any-split" and total_split == 0:
-        bad = "expected any-split but every revision is raw"
-    elif expect == "all-raw" and total_split > 0:
-        bad = "expected all-raw but %d revision(s) are split" % total_split
-    if bad:
-        return violation(assert_mode, lines + ["FAIL  " + bad])
-
-    lines.append("PASS  expect=%s held (raw=%d split=%d)" % (expect, total_raw, total_split))
-    return lines
-
-
 def k_extension_stats_parity(p):
     """Assert selected `aspects` (attachments/counters/timeseries) match across nodes."""
     nodes = p["nodes"]
@@ -955,77 +518,13 @@ def k_extension_stats_parity(p):
     return lines
 
 
-def k_hub_sink_doc_set(p):
-    hub_leader = p["hub_cluster_leader"]
-    sink_leader = p["sink_cluster_leader"]
-    db = p["db_name"]
-    allowed = p["allowed_prefixes"] or []
-    sink_local = p["sink_local_prefixes"] or []
-    assert_mode = bool(p["assert_mode"])
-    sample_cap = int(p["sample_cap"] or 25)
-
-    if not hub_leader or not sink_leader:
-        raise ValueError(
-            "kind=hub_sink_doc_set requires `hub_cluster_leader` and `sink_cluster_leader`")
-    if not allowed:
-        raise ValueError(
-            "kind=hub_sink_doc_set requires `allowed_prefixes` (hub->sink filter)")
-
-    hub_ids = set(stream_all_doc_ids(
-        hub_leader, p["ravendb_domain"], db, p["client_cert"], p["ca_cert"]))
-    sink_ids = set(stream_all_doc_ids(
-        sink_leader, p["ravendb_domain"], db, p["client_cert"], p["ca_cert"]))
-
-    expected_on_sink = {i for i in hub_ids if prefix_match(i, allowed)}
-    expected_on_hub  = {i for i in sink_ids if not prefix_match(i, sink_local)}
-
-    missing_on_sink = sorted(expected_on_sink - sink_ids)
-    missing_on_hub  = sorted(expected_on_hub - hub_ids)
-
-    lines = [
-        "hub-sink doc-set completeness  hub=%s  sink=%s  db=%s"
-        % (hub_leader, sink_leader, db),
-        "  hub ids: %d   sink ids: %d" % (len(hub_ids), len(sink_ids)),
-        "  filter (hub->sink): %s" % allowed,
-        "  sink-local allowlist: %s" % (sink_local or "[]"),
-        "  expected-on-sink (hub ids matching filter): %d" % len(expected_on_sink),
-        "  expected-on-hub  (sink ids not in sink-local): %d" % len(expected_on_hub),
-        "  MISSING on sink: %d" % len(missing_on_sink),
-        "  MISSING on hub:  %d" % len(missing_on_hub),
-    ]
-    if missing_on_sink:
-        lines.append("  missing-on-sink sample (first %d of %d): %s"
-                     % (min(sample_cap, len(missing_on_sink)),
-                        len(missing_on_sink),
-                        missing_on_sink[:sample_cap]))
-    if missing_on_hub:
-        lines.append("  missing-on-hub  sample (first %d of %d): %s"
-                     % (min(sample_cap, len(missing_on_hub)),
-                        len(missing_on_hub),
-                        missing_on_hub[:sample_cap]))
-
-    if missing_on_sink or missing_on_hub:
-        return violation(assert_mode, lines + [
-            "FAIL  hub-sink completeness: %d missing on sink, %d missing on hub"
-            % (len(missing_on_sink), len(missing_on_hub))])
-    lines.append("PASS  every expected doc is present on both sides")
-    return lines
-
-
 def k_stats_parity(p):
     """Print a per-node stats table and assert uniformity on `assert_fields`.
 
-    Fields not in `assert_fields` are still printed (marked "OK (info)" or
-    "DRIFT (info)") so drift on intrinsic-per-node fields is visible but not fatal.
-    SizeOnDisk is always info-only.
-
-    Optional `settle_secs`: before reading the table, poll the asserted fields
-    until they agree across all has_db nodes (or timeout).  /stats counters
-    update asynchronously a few seconds behind the etag; a preceding wait
-    (etag_parity / quiescence) returns the instant the etag stops moving but
-    the materialized CountOfDocuments / CountOfRevisionDocuments counters
-    can still lag by a poll interval or two.  When `settle_secs > 0`, the
-    pre-settle loop closes that race so the final assertion is reliable."""
+    Fields not in `assert_fields` are printed as info only.  When `settle_secs > 0`,
+    poll the asserted fields until they agree across all has_db nodes before the
+    final assertion.
+    """
     nodes = p["nodes"]
     assert_mode = bool(p["assert_mode"])
     assert_fields = p["assert_fields"] or _STATS_DEFAULT_ASSERTED
@@ -1062,9 +561,8 @@ def k_stats_parity(p):
             time.sleep(settle_interval)
 
     per_node = {}
-    for target, shard_id in (has_db.items() if isinstance(has_db, dict)
-                             else [(t, None) for t in has_db]):
-        s = get_stats(p, target, shard_id=shard_id)
+    for target in has_db:
+        s = get_stats(p, target)
         if s is None:
             continue
         row = {}
@@ -1131,22 +629,13 @@ def k_stats_parity(p):
     return lines
 
 
-# ============================================================================
-# === Leak / orphan kinds ====================================================
-# ============================================================================
-
 def k_orphan_revisions(p):
-    """Trigger /admin/revisions/orphaned/adopt on every node, wait for completion,
-    and FAIL if any node reports a non-zero AdoptedCount.
-
-    Inconclusive results (operation-id recycling returning a non-adopt $type) are
-    surfaced separately."""
+    """Trigger orphaned-revision adopt on every node, wait, and FAIL on any non-zero AdoptedCount."""
     nodes = p["nodes"]
     db = p["db_name"]
     assert_mode = bool(p["assert_mode"])
     budget = int(p["budget_secs"] or 60)
 
-    # Trigger adopt on every node.
     op_ids = {}
     unreachable_nodes = []
     for target in nodes:
@@ -1166,7 +655,6 @@ def k_orphan_revisions(p):
             "k_orphan_revisions: %s unreachable -- can't determine orphan state"
             % sorted(unreachable_nodes))
 
-    # Poll for terminal state per node.
     adopted = {}
     inconclusive = []
     deadline = time.monotonic() + budget
@@ -1188,8 +676,6 @@ def k_orphan_revisions(p):
             if "AdoptOrphanedRevisionsResult" in result_type:
                 adopted[target] = result.get("AdoptedCount", 0)
             else:
-                # RavenDB recycles operation ids on fast operations; we may have
-                # observed a stale result from a different op.  Mark inconclusive.
                 adopted[target] = "?"
                 inconclusive.append(target)
         for t in done_now:
@@ -1218,787 +704,21 @@ def k_orphan_revisions(p):
     return lines
 
 
-def k_scan_fltr(p):
-    """Walk `capture_dir` for *.cv files and FAIL on any file containing the FLTR: marker."""
-    capture_dir = p["capture_dir"]
-    assert_mode = bool(p["assert_mode"])
-    if not capture_dir or not os.path.isdir(capture_dir):
-        raise ValueError("capture_dir must be an existing directory; got %r" % capture_dir)
-
-    found_files = []
-    for dirpath, _dirs, files in os.walk(capture_dir):
-        for name in files:
-            if name.endswith(".cv"):
-                found_files.append(os.path.join(dirpath, name))
-
-    if not found_files:
-        raise RuntimeError(
-            "k_scan_fltr: 0 .cv files found under %s -- nothing to scan, "
-            "can't verify FLTR-cleanliness" % capture_dir)
-
-    leaks = []
-    for path in found_files:
-        with open(path, "r") as f:
-            content = f.read()
-        if "FLTR:" in content:
-            leaks.append((path, content.strip()))
-
-    lines = ["FLTR scan: %d .cv file(s) under %s, leaks=%d" %
-             (len(found_files), capture_dir, len(leaks))]
-    for path, content in leaks:
-        lines.append("  LEAK  %s  ::  %s" % (path, content))
-
-    if leaks and assert_mode:
-        return violation(True, lines + ["FAIL  FLTR leakage detected"])
-    return lines
-
-
-def k_lane_inert(p):
-    """Sample revisions for each id_prefix and FAIL if any revision CV contains '|'
-    (the new-lane composite-CV delimiter).  Used to verify the new lane stayed inert
-    on lanes that should still be on the legacy raw form."""
-    nodes = p["nodes"]
-    db = p["db_name"]
-    prefixes = p["id_prefixes"]
-    sample = int(p["sample_per_prefix"] or 25)
-    assert_mode = bool(p["assert_mode"])
-
-    if not prefixes:
-        raise ValueError("kind=lane_inert requires `id_prefixes` (non-empty list)")
-
-    probe_ids = []
-    for prefix in prefixes:
-        clean = prefix.rstrip("/")
-        for n in range(sample):
-            probe_ids.append("%s/%d" % (clean, n))
-
-    leaks = []
-    sampled = 0
-    unreachable_nodes = set()
-    for target in nodes:
-        for doc_id in probe_ids:
-            if target in unreachable_nodes:
-                break
-            path = "/databases/%s/revisions?id=%s&pageSize=100" % (db, quote(doc_id))
-            try:
-                status, body = request("GET", target, p["ravendb_domain"], path,
-                                       p["client_cert"], p["ca_cert"])
-            except Exception:
-                unreachable_nodes.add(target)
-                break
-            if status != 200:
-                continue
-            revisions = json.loads(body).get("Results") or []
-            sampled += len(revisions)
-            for rev in revisions:
-                cv = (rev.get("@metadata") or {}).get("@change-vector") or ""
-                if "|" in cv:
-                    leaks.append("%s / %s / %s" % (target, doc_id, cv))
-
-    if unreachable_nodes:
-        raise RuntimeError(
-            "k_lane_inert: %s unreachable -- can't determine lane-inertness"
-            % sorted(unreachable_nodes))
-
-    if sampled == 0:
-        raise RuntimeError(
-            "k_lane_inert: 0 revisions sampled across %s for prefixes %s -- "
-            "can't verify lane-inertness with no data" % (nodes, prefixes))
-
-    # Pull SupportedFeatures for the forensic line; non-fatal if unreachable.
-    rec_path = "/admin/databases?name=%s" % quote(db)
-    features = {}
-    try:
-        status, body = request("GET", nodes[0], p["ravendb_domain"], rec_path,
-                               p["client_cert"], p["ca_cert"])
-        if status == 200:
-            features = json.loads(body).get("SupportedFeatures") or {}
-    except Exception:
-        pass
-
-    lines = ["lane-inert check (db=%s, %d node(s), %d prefix(es), %d revisions sampled):" %
-             (db, len(nodes), len(prefixes), sampled),
-             "  leaks (new-lane '|' in CV): %d" % len(leaks),
-             "  forensic: SupportedFeatures = %s" % features]
-    if leaks:
-        lines.append("  sample (first 5):")
-        for leak in leaks[:5]:
-            lines.append("    " + leak)
-
-    if leaks:
-        return violation(assert_mode, lines +
-                         ["FAIL  lane-inert breach: %d revision CV(s) contain '|'" % len(leaks)])
-    lines.append("PASS  no '|' in any sampled revision CV; new lane stayed inert")
-    return lines
-
-
-def k_filter_compliance(p):
-    """List every doc id on the sink leader and FAIL on any id that doesn't start
-    with one of `allowed_prefixes` (auto-discovered from DatabaseRecord.SinkPullReplications
-    if not provided)."""
-    sink_leader = p["sink_cluster_leader"]
-    db = p["db_name"]
-    assert_mode = bool(p["assert_mode"])
-    allowed = p["allowed_prefixes"]
-
-    if not allowed:
-        rec_path = "/admin/databases?name=%s" % quote(db)
-        try:
-            status, body = request("GET", sink_leader, p["ravendb_domain"], rec_path,
-                                   p["client_cert"], p["ca_cert"])
-        except Exception:
-            raise RuntimeError("k_filter_compliance: %s unreachable -- can't read DatabaseRecord"
-                               % sink_leader)
-        if status != 200:
-            raise RuntimeError("GET DatabaseRecord on %s failed: HTTP %d" % (sink_leader, status))
-        sink_pulls = json.loads(body).get("SinkPullReplications") or []
-        prefixes = []
-        for entry in sink_pulls:
-            for p_str in (entry.get("AllowedHubToSinkPaths") or []):
-                prefixes.append(p_str.rstrip("*"))
-        allowed = sorted(set(prefixes))
-
-    if not allowed:
-        raise RuntimeError("could not resolve allowed_prefixes (none passed, none in DatabaseRecord)")
-
-    list_path = "/databases/%s/docs?start=0&pageSize=100000&metadataOnly=true" % db
-    try:
-        status, body = request("GET", sink_leader, p["ravendb_domain"], list_path,
-                               p["client_cert"], p["ca_cert"])
-    except Exception:
-        raise RuntimeError("k_filter_compliance: %s unreachable -- can't list docs" % sink_leader)
-    if status != 200:
-        raise RuntimeError("list docs on %s failed: HTTP %d" % (sink_leader, status))
-    results = json.loads(body).get("Results") or []
-    sink_ids = [(r.get("@metadata") or {}).get("@id") for r in results]
-    sink_ids = [i for i in sink_ids if i is not None]
-
-    leaks = [i for i in sink_ids if not any(i.startswith(pre) for pre in allowed)]
-
-    lines = ["filter compliance on %s/%s:" % (sink_leader, db),
-             "  allowed_prefixes: %s" % allowed,
-             "  total sink docs: %d" % len(sink_ids),
-             "  leak ids (no allowed prefix matched): %d" % len(leaks)]
-    if leaks:
-        lines.append("  sample (first 10): %s" % leaks[:10])
-
-    if leaks:
-        return violation(assert_mode, lines +
-                         ["FAIL  filter leak: %d doc(s) don't match %s" % (len(leaks), allowed)])
-    lines.append("PASS  every sink doc matches an allowed prefix")
-    return lines
-
-
-def k_cross_sink_isolation(p):
-    """Probe each `forbidden_prefixes/<N>` doc id on the sink leader and FAIL on any 200."""
-    sink_leader = p["sink_cluster_leader"]
-    db = p["db_name"]
-    forbidden = p["forbidden_prefixes"]
-    sample = int(p["sample_per_prefix"] or 100)
-    assert_mode = bool(p["assert_mode"])
-
-    if not forbidden:
-        raise ValueError("kind=cross_sink_isolation requires `forbidden_prefixes`")
-
-    probe_ids = []
-    for prefix in forbidden:
-        clean = prefix.rstrip("/")
-        for n in range(sample):
-            probe_ids.append("%s/%d" % (clean, n))
-
-    leaks = []
-    for doc_id in probe_ids:
-        path = "/databases/%s/docs?id=%s" % (db, quote(doc_id))
-        try:
-            status, _ = request("GET", sink_leader, p["ravendb_domain"], path,
-                                p["client_cert"], p["ca_cert"])
-        except Exception:
-            raise RuntimeError(
-                "k_cross_sink_isolation: %s unreachable -- can't probe %d forbidden prefix(es)"
-                % (sink_leader, len(forbidden)))
-        if status == 200:
-            leaks.append(doc_id)
-
-    lines = ["cross-sink isolation check on %s/%s:" % (sink_leader, db),
-             "  forbidden_prefixes: %s" % forbidden,
-             "  probes: %d  leaks: %d" % (len(probe_ids), len(leaks))]
-    if leaks:
-        lines.append("  sample (first 10): %s" % leaks[:10])
-
-    if leaks:
-        return violation(assert_mode, lines +
-                         ["FAIL  cross-sink leak: %d doc(s) with forbidden prefix found" % len(leaks)])
-    lines.append("PASS  no forbidden-prefix docs on this sink")
-    return lines
-
-
-# ============================================================================
-# === CV-shape kinds =========================================================
-# ============================================================================
-
-def k_stored_item_cv_split(p):
-    """Check the change-vector SHAPE of each probed document on a single node.
-
-    Each document's @change-vector is either:
-      - 'raw'   = legacy form, a flat list of entries (no pipe character)
-      - 'split' = new composite form, two halves separated by `delimiter` (default '|')
-
-    expect='split' -> every probed doc's CV must contain the delimiter.
-    expect='raw'   -> every probed doc's CV must NOT contain the delimiter.
-
-    Special case: with expect='split', if NO probed doc has the delimiter, we
-    treat the whole probe as N/A (the composite-CV lane is not active on this
-    build) instead of failing.  This is intentional: the kind is meant to detect
-    SHAPE drift, not to assert the feature is on."""
-    target = p["target"]
-    db = p["db_name"]
-    doc_ids = p["doc_ids"]
-    expect = p["expect"] or "split"
-    delimiter = p["delimiter"] or "|"
-    assert_mode = bool(p["assert_mode"])
-
-    if not doc_ids:
-        raise ValueError("kind=stored_item_cv_split requires `doc_ids` (non-empty list)")
-
-    lines = ["stored-item CV shape check on %s/%s (expect=%s, delimiter='%s'):" %
-             (target, db, expect, delimiter)]
-
-    cvs = {}
-    unreachable = False
-    bad_status = {}
-    for doc_id in doc_ids:
-        path = "/databases/%s/docs?id=%s" % (db, quote(doc_id))
-        try:
-            status, body = request("GET", target, p["ravendb_domain"], path,
-                                   p["client_cert"], p["ca_cert"])
-        except Exception:
-            unreachable = True
-            break
-        if status != 200:
-            bad_status[doc_id] = status
-            continue
-        results = json.loads(body).get("Results") or []
-        cv = ""
-        if results:
-            cv = (results[0].get("@metadata") or {}).get("@change-vector") or ""
-        cvs[doc_id] = cv
-
-    if unreachable:
-        raise RuntimeError(
-            "k_stored_item_cv_split: target %s unreachable -- can't verify "
-            "stored-item CV shape" % target)
-
-    if bad_status:
-        raise RuntimeError(
-            "k_stored_item_cv_split: %d/%d probe doc(s) unreadable on %s "
-            "(HTTP statuses: %s) -- can't verify CV shape on partial coverage" %
-            (len(bad_status), len(doc_ids), target, bad_status))
-
-    if expect == "split" and not any(delimiter in v for v in cvs.values()):
-        for doc_id, cv in cvs.items():
-            lines.append("  %s  LEGACY raw CV (no '%s')" % (doc_id, delimiter))
-        lines.append("N/A  legacy raw-CV form across all probes -- composite-CV lane not active on this build")
-        return lines
-
-    violations = []
-    for doc_id, cv in cvs.items():
-        has_delim = delimiter in cv
-        ok = (has_delim and expect == "split") or (not has_delim and expect == "raw")
-        verdict = "OK" if ok else "MISMATCH"
-        lines.append("  %s  %s" % (doc_id, verdict))
-        if has_delim:
-            order, extra = cv.split(delimiter, 1)
-            lines.append("    order: %s" % order.strip())
-            lines.append("    extra: %s" % extra.strip())
-        else:
-            lines.append("    raw  : %s" % cv)
-        if not ok:
-            violations.append(doc_id)
-
-    if violations:
-        return violation(assert_mode, lines +
-                         ["FAIL  %d doc(s) don't match expected shape:" % len(violations)] +
-                         ["    %s" % v for v in violations])
-    lines.append("PASS  every probed doc matches expected '%s' shape" % expect)
-    return lines
-
-
-def k_cv_boundary_by_dbid(p):
-    """Verify no source-cluster dbid appears on the order side of any receiver's DB CV.
-
-    Requires `source_nodes` and `receiver_nodes` (different physical clusters).
-    `strict_v_new=true` additionally FAILs receivers still on the legacy raw CV form
-    (no '|' delimiter)."""
-    db = p["db_name"]
-    sources = p["source_nodes"]
-    receivers = p["receiver_nodes"]
-    strict_v_new = bool(p["strict_v_new"])
-    assert_mode = bool(p["assert_mode"])
-
-    if not sources or not receivers:
-        raise ValueError("kind=cv_boundary_by_dbid requires `source_nodes` and `receiver_nodes`")
-
-    source_dbids = set()
-    unreachable_sources = []
-    for target in sources:
-        s = get_stats(p, target)
-        if s is None:
-            unreachable_sources.append(target)
-            continue
-        dbid = s.get("DatabaseId")
-        if dbid:
-            source_dbids.add(dbid)
-
-    if unreachable_sources:
-        raise RuntimeError(
-            "k_cv_boundary_by_dbid: %s source nodes unreachable -- can't "
-            "enumerate source dbids" % sorted(unreachable_sources))
-
-    receiver_dbids = set()
-    receiver_cvs = {}
-    unreachable_receivers = []
-    for target in receivers:
-        s = get_stats(p, target)
-        if s is None:
-            unreachable_receivers.append(target)
-            continue
-        dbid = s.get("DatabaseId")
-        if dbid:
-            receiver_dbids.add(dbid)
-        receiver_cvs[target] = s.get("DatabaseChangeVector") or ""
-
-    if unreachable_receivers:
-        raise RuntimeError(
-            "k_cv_boundary_by_dbid: %s receiver nodes unreachable -- can't "
-            "verify CV boundary" % sorted(unreachable_receivers))
-
-    if source_dbids & receiver_dbids:
-        raise RuntimeError(
-            "k_cv_boundary_by_dbid: source and receiver dbid sets overlap "
-            "(source=%s receiver=%s) -- not distinct clusters" %
-            (sorted(source_dbids), sorted(receiver_dbids)))
-
-    lines = ["CV-boundary by dbid (db=%s):" % db,
-             "  source dbids:   %s" % sorted(source_dbids),
-             "  receiver dbids: %s" % sorted(receiver_dbids)]
-
-    legacy = []
-    source_leaks = []
-    unknown = []
-    for target, cv in receiver_cvs.items():
-        if "|" not in cv:
-            legacy.append(target)
-            lines.append("  %s  LEGACY raw CV (no '|') -- N/A on this CV form" % target)
-            continue
-        order_side = cv.split("|", 1)[0]
-        entries = parse_cv_entries(order_side)
-        leaked = [d for _, d in entries if d in source_dbids]
-        unk = [d for _, d in entries if d not in source_dbids and d not in receiver_dbids]
-        lines.append("  %s  new-lane  order_side='%s'  source_leaks=%d  unknown_dbids=%d" %
-                     (target, order_side, len(leaked), len(unk)))
-        if leaked:
-            source_leaks.append((target, leaked))
-        if unk:
-            unknown.extend(unk)
-
-    if strict_v_new and legacy and assert_mode:
-        return violation(True, lines +
-                         ["FAIL  strict_v_new=true but legacy CV on: %s" % legacy])
-
-    if source_leaks:
-        return violation(assert_mode, lines +
-                         ["FAIL  CV-boundary breach: source dbid on order side: %s" % source_leaks])
-
-    if unknown:
-        lines.append("WARN  unknown dbids on order side (not source, not receiver): %s" %
-                     sorted(set(unknown)))
-    lines.append("PASS  no source dbids on any receiver's order side")
-    return lines
-
-
-def k_db_cv_health(p):
-    """Assert two properties of the DB-level DatabaseChangeVector (from /stats):
-
-      intact  -- every dbid present in baseline is still in postbatch with
-                 etag >= baseline (no rewind, no entry loss).
-      no leak -- the dbid set on `hub_nodes` and the dbid set on `sink_nodes`
-                 are disjoint in postbatch (no hub identity bled into sink's
-                 DB CV, and vice versa).
-
-    Reads CVs from `<baseline_dir>/<node>.cv` and `<postbatch_dir>/<node>.cv`
-    (written earlier by capture_cv).  Empty baseline files are treated as
-    "DB had no writes pre-burst" and the intact check for that node is
-    skipped with a note (not a failure)."""
-    hub_nodes = p["hub_nodes"] or []
-    sink_nodes = p["sink_nodes"] or []
-    baseline_dir = p["baseline_dir"]
-    postbatch_dir = p["postbatch_dir"]
-    assert_mode = bool(p["assert_mode"])
-
-    if not hub_nodes or not sink_nodes:
-        raise ValueError("kind=db_cv_health requires non-empty `hub_nodes` and `sink_nodes`")
-    if not baseline_dir or not postbatch_dir:
-        raise ValueError("kind=db_cv_health requires `baseline_dir` and `postbatch_dir`")
-
-    def _load(path):
-        try:
-            txt = open(path).read().strip()
-        except FileNotFoundError:
-            return None
-        if not txt:
-            return {}
-        return {dbid: int(etag) for _tag, etag, dbid in
-                _CV_ENTRY_FULL_RE.findall(txt)}
-
-    lines = ["DB-CV health  (hub=%s  sink=%s)" % (hub_nodes, sink_nodes), ""]
-    fails = []
-
-    # --- Intactness, per side, per node --------------------------------------
-    lines.append("  Intactness (every baseline dbid still present, etag not rewound):")
-    for side, nodes in (("hub ", hub_nodes), ("sink", sink_nodes)):
-        for node in nodes:
-            b = _load(os.path.join(baseline_dir, "%s.cv" % node))
-            q = _load(os.path.join(postbatch_dir, "%s.cv" % node))
-            if b is None or q is None:
-                lines.append("    %s %-6s  FAIL -- MISSING capture file" % (side, node))
-                fails.append("intact %s/%s: missing capture file" % (side.strip(), node))
-                continue
-            if not b:
-                lines.append("    %s %-6s  skipped (baseline empty -- no pre-burst writes)"
-                             % (side, node))
-                continue
-            missing = sorted(d for d in b if d not in q)
-            rewound = sorted((d, b[d], q[d]) for d in b if d in q and q[d] < b[d])
-            if missing or rewound:
-                lines.append("    %s %-6s  FAIL" % (side, node))
-                if missing:
-                    lines.append("      missing dbid(s) in postbatch: %s" % missing)
-                    fails.append("intact %s/%s: missing %s" % (side.strip(), node, missing))
-                if rewound:
-                    lines.append("      rewound dbid(s) (dbid, baseline_etag, postbatch_etag): %s"
-                                 % rewound)
-                    fails.append("intact %s/%s: rewound %s" % (side.strip(), node, rewound))
-            else:
-                lines.append("    %s %-6s  OK -- %d dbid(s) advanced or equal"
-                             % (side, node, len(b)))
-
-    # --- Leakage check (hub dbid set vs sink dbid set must be disjoint) ------
-    hub_set = set()
-    for n in hub_nodes:
-        d = _load(os.path.join(postbatch_dir, "%s.cv" % n))
-        if d:
-            hub_set |= set(d)
-    sink_set = set()
-    for n in sink_nodes:
-        d = _load(os.path.join(postbatch_dir, "%s.cv" % n))
-        if d:
-            sink_set |= set(d)
-    overlap = hub_set & sink_set
-
-    lines.append("")
-    lines.append("  Leakage (hub DB-CV dbids vs sink DB-CV dbids must be disjoint):")
-    lines.append("    hub  dbids (%d):" % len(hub_set))
-    for d in sorted(hub_set):
-        lines.append("      - %s" % d)
-    lines.append("    sink dbids (%d):" % len(sink_set))
-    for d in sorted(sink_set):
-        lines.append("      - %s" % d)
-    if overlap:
-        lines.append("    overlap (%d): %s  ->  LEAK FOUND" % (len(overlap), sorted(overlap)))
-        fails.append("leak: hub<->sink share dbid(s) %s" % sorted(overlap))
-    else:
-        lines.append("    overlap: none  ->  NO LEAK")
-
-    lines.append("")
-    if fails:
-        return violation(assert_mode, lines + ["RESULT: FAIL  --  %s" % "; ".join(fails)])
-    lines.append("RESULT: PASS  --  DB-CV intact + no hub<->sink dbid leakage")
-    return lines
-
-
-def k_db_cv_order_side_only(p):
-    """Check that every receiver's database change vector only references
-    cluster tags from the receiver's own cluster -- no foreign cluster tags.
-
-    Cluster tags are the single-letter identifiers (A, B, C, ...) RavenDB
-    stamps into each CV entry.  By default we derive the allowed tags from
-    the trailing letter of each receiver node name ('1a' -> 'A', '2b' -> 'B').
-    Pass `receiver_group_tags` to override that auto-derivation."""
-    db = p["db_name"]
-    receivers = p["receiver_group_nodes"]
-    assert_mode = bool(p["assert_mode"])
-
-    if not receivers:
-        raise ValueError("kind=db_cv_order_side_only requires `receiver_group_nodes`")
-
-    if p["receiver_group_tags"]:
-        tags = [t.upper() for t in p["receiver_group_tags"]]
-    else:
-        tags = [n[-1].upper() for n in receivers]
-
-    lines = ["db-CV order-side-only check (db=%s, expected tags=%s):" % (db, tags)]
-    offending = []
-    unreachable_receivers = []
-    empty_cv_receivers = []
-    for target in receivers:
-        s = get_stats(p, target)
-        if s is None:
-            unreachable_receivers.append(target)
-            continue
-        cv = s.get("DatabaseChangeVector") or ""
-        if not cv.strip():
-            empty_cv_receivers.append(target)
-            continue
-        entries = parse_cv_entries(cv)
-        bad_tags = [t for t, _ in entries if t not in tags]
-        marker = "OK" if not bad_tags else "LEAK %s" % sorted(set(bad_tags))
-        lines.append("  %s  %s  (%d CV entries)" % (target, marker, len(entries)))
-        for raw_entry in [s.strip() for s in cv.split(",") if s.strip()]:
-            tag = raw_entry.split(":", 1)[0]
-            prefix = "      " if tag in tags else "    LEAK"
-            lines.append("%s  %s" % (prefix, raw_entry))
-        if bad_tags:
-            offending.append((target, bad_tags))
-
-    if unreachable_receivers:
-        raise RuntimeError(
-            "k_db_cv_order_side_only: %s receiver nodes unreachable -- "
-            "can't verify order-side-only" % sorted(unreachable_receivers))
-
-    if empty_cv_receivers:
-        raise RuntimeError(
-            "k_db_cv_order_side_only: %s receivers reported an empty "
-            "DatabaseChangeVector -- nothing to check, can't verify "
-            "order-side-only" % sorted(empty_cv_receivers))
-
-    if offending:
-        return violation(assert_mode, lines +
-                         ["FAIL  CV-boundary breach: foreign tag on: %s" % offending])
-    lines.append("PASS  every receiver's DB CV references only %s" % tags)
-    return lines
-
-
-def k_shard_placement_check(p):
-    """Assert each probe doc id lives on EXACTLY ONE shard of `target/db_name`.
-
-    `target` is any node in a sharded cluster.  The kind:
-      1. Reads /admin/databases?name=<db> on `target` to enumerate shard ids.
-      2. For each probe doc id, GETs /databases/<db>/docs?id=<id>&shardNumber=N
-         once per shard N (per-shard route -- same pattern get_stats uses for
-         /stats).  Exactly one shard must return 200; all others must return
-         non-200 (typically 404).
-      3. Doc ids that are present on 0 shards (missing) or >1 shards
-         (mis-routed -- the orchestrator placed the same id on multiple
-         shards) are reported.
-
-    Returns list[str] with the per-id placement table (first 10) + PASS/FAIL line.
-    """
-    target = p["target"]
-    db = p["db_name"]
-    assert_mode = bool(p["assert_mode"])
-    probe_ids = expand_id_set(p)
-
-    s, b = request("GET", target, p["ravendb_domain"],
-                   "/admin/databases?name=%s" % db,
-                   p["client_cert"], p["ca_cert"])
-    if s != 200:
-        raise RuntimeError(
-            "%s/%s: /admin/databases returned HTTP %d -- db missing or node unreachable"
-            % (target, db, s))
-    rec = json.loads(b)
-    shards = (rec.get("Sharding") or {}).get("Shards") or {}
-    if not shards:
-        raise RuntimeError(
-            "%s/%s: not a sharded database -- shard_placement_check requires sharding"
-            % (target, db))
-    shard_ids = sorted(shards.keys(), key=lambda s: int(s))
-
-    # All sharded reads route through the orchestrator (the cursor 7.2 build
-    # serves only local-shard data on non-orchestrator nodes -- direct
-    # per-shard URLs return 410).  We probe each shard by asking the
-    # orchestrator with ?nodeTag=<member_of_shard_N> -- the orchestrator
-    # proxies the GET to that node, which returns the doc iff this shard
-    # owns it.  Documents that the orchestrator's id-routing did NOT place
-    # on this shard show up as empty Results.
-    cluster_prefix = target[:-1]
-    try:
-        orch = orchestrator_for(target, p["ravendb_domain"], db,
-                                p["client_cert"], p["ca_cert"])
-    except Exception as e:
-        raise RuntimeError(
-            "%s/%s: orchestrator lookup failed: %r" % (target, db, e))
-
-    shard_probe_node = {}
-    for shard_id in shard_ids:
-        members = shards.get(shard_id, {}).get("Members") or []
-        if not members:
-            raise RuntimeError(
-                "%s/%s: shard %s has no Members -- can't determine placement"
-                % (target, db, shard_id))
-        shard_probe_node[shard_id] = members[0]   # tag, e.g. 'A'
-
-    per_id_owners = {}
-    for doc_id in probe_ids:
-        owners = []
-        for shard_id in shard_ids:
-            tag = shard_probe_node[shard_id]
-            path = with_node_tag(
-                "/databases/%s/docs?id=%s" % (db, quote(doc_id)), tag)
-            try:
-                status, body = request("GET", orch, p["ravendb_domain"], path,
-                                       p["client_cert"], p["ca_cert"])
-            except Exception:
-                raise RuntimeError(
-                    "%s/%s shard=%s @ orchestrator %s: transport error during "
-                    "placement probe for id=%s"
-                    % (target, db, shard_id, orch, doc_id))
-            if status == 200 and (json.loads(body).get("Results") or []):
-                owners.append(shard_id)
-        per_id_owners[doc_id] = owners
-
-    missing = [i for i, o in per_id_owners.items() if len(o) == 0]
-    duplicate = [(i, o) for i, o in per_id_owners.items() if len(o) > 1]
-
-    lines = ["shard placement on %s/%s  (%d id(s) across shards %s):"
-             % (target, db, len(probe_ids), shard_ids)]
-    for i, o in list(per_id_owners.items())[:10]:
-        lines.append("  %-30s  owners=%s" % (i, o))
-    lines.append("  missing(0-shard): %d   duplicate(>1-shard): %d" % (len(missing), len(duplicate)))
-
-    if missing or duplicate:
-        return violation(assert_mode, lines + [
-            "FAIL  missing on: %s   duplicate on: %s"
-            % (missing[:20], duplicate[:20])])
-    lines.append("PASS  every probe id lives on exactly one shard")
-    return lines
-
-
-def k_cross_cluster_cv_equality(p):
-    """Per-doc CV (dbid, etag)-set equality across `nodes`.
-
-    Equality mode (anchor unset):  all nodes must produce the same (dbid, etag) set.
-    Anchor mode (anchor set):      anchor's set must be a SUBSET of every other node's.
-                                   Used for hub-vs-sinks checks where multi-node sinks
-                                   add their own local dbId entry on receive (RF>1 -> local
-                                   etag entry; RF=1 -> no extra entry).  The hub's upstream
-                                   entry must survive intact on every sink."""
-    nodes = p["nodes"]
-    db = p["db_name"]
-    doc_ids = p["doc_ids"]
-    assert_mode = bool(p["assert_mode"])
-    anchor = p.get("anchor")
-
-    if not nodes or len(nodes) < 2:
-        raise ValueError("kind=cross_cluster_cv_equality requires `nodes` with >=2 targets")
-    if not doc_ids:
-        raise ValueError("kind=cross_cluster_cv_equality requires `doc_ids` (non-empty list)")
-    if anchor and anchor not in nodes:
-        raise ValueError("kind=cross_cluster_cv_equality `anchor=%s` not in `nodes=%s`" %
-                         (anchor, nodes))
-
-    lines = ["cross-cluster CV equality on %s across %d node(s) [%s]:" %
-             (db, len(nodes), ", ".join(nodes))]
-    mismatched = []
-    unreachable = []
-
-    for doc_id in doc_ids:
-        per_node = {}
-        for target in nodes:
-            path = "/databases/%s/docs?id=%s" % (db, quote(doc_id))
-            status, body = request("GET", target, p["ravendb_domain"], path,
-                                   p["client_cert"], p["ca_cert"])
-            if status != 200:
-                per_node[target] = ("HTTP_%d" % status, None)
-                continue
-            results = json.loads(body).get("Results") or []
-            if not results:
-                per_node[target] = ("NOT_FOUND", None)
-                continue
-            cv = (results[0].get("@metadata") or {}).get("@change-vector") or ""
-            per_node[target] = (cv, _parse_cv_set(cv))
-
-        bad_targets = [t for t, (_, parsed) in per_node.items() if parsed is None]
-        if bad_targets:
-            unreachable.append(doc_id)
-            lines.append("  %-25s  UNREACHABLE on %s" % (doc_id, bad_targets))
-            for t, (info, _) in per_node.items():
-                lines.append("    %s  %s" % (t, info))
-            continue
-
-        parsed_sets = {t: per_node[t][1] for t in nodes}
-        if anchor:
-            anchor_set = parsed_sets[anchor]
-            doc_ok = all(anchor_set.issubset(parsed_sets[t]) for t in nodes if t != anchor)
-        else:
-            first = parsed_sets[nodes[0]]
-            doc_ok = all(parsed_sets[t] == first for t in nodes[1:])
-
-        if not doc_ok:
-            mismatched.append(doc_id)
-            lines.append("  %-25s  MISMATCH" % doc_id)
-            for t in nodes:
-                cv, parsed = per_node[t]
-                tag = "  <-- anchor" if t == anchor else ""
-                lines.append("    %s  cv='%s'  entries=%s%s" %
-                             (t, (cv or "")[:80],
-                              sorted(parsed) if parsed else "<empty>", tag))
-
-    lines.append("  checked %d doc(s); mismatched=%d  unreachable=%d" %
-                 (len(doc_ids), len(mismatched), len(unreachable)))
-
-    if mismatched or unreachable:
-        return violation(assert_mode, lines + [
-            "FAIL  cross-cluster CV equality broke on %d doc(s); unreachable on %d" %
-            (len(mismatched), len(unreachable))])
-    if assert_mode:
-        mode_desc = ("anchor=%s entries subset-of every node" % anchor) if anchor \
-                    else ("identical CV-entry set across all %d cluster(s)" % len(nodes))
-        lines.append("PASS  every doc satisfies cross-cluster CV check (%s)" % mode_desc)
-    return lines
-
-
-# ============================================================================
-# KINDS registry
-# ============================================================================
-
 KINDS = {
-    # --- info-only ---
     "doc_count":                  k_doc_count,
     "replication":                k_replication,
     "replication_health":         k_replication_health,
     "schema_version":             k_schema_version,
     "size_envelope":              k_size_envelope,
     "supported_features":         k_supported_features,
-    # --- capture ---
-    "capture_cv":                 k_capture_cv,
-    "capture_doc_cv":             k_capture_doc_cv,
-    # --- parity ---
     "doc_count_parity":           k_doc_count_parity,
     "doc_id_set_parity":          k_doc_id_set_parity,
     "extension_stats_parity":     k_extension_stats_parity,
     "revision_count_parity":      k_revision_count_parity,
-    "revision_form_sampling":     k_revision_form_sampling,
     "stats_parity":               k_stats_parity,
-    # --- leak / orphan ---
-    "cross_sink_isolation":       k_cross_sink_isolation,
-    "filter_compliance":          k_filter_compliance,
-    "hub_sink_doc_set":           k_hub_sink_doc_set,
-    "lane_inert":                 k_lane_inert,
     "orphan_revisions":           k_orphan_revisions,
-    "scan_fltr":                  k_scan_fltr,
-    "shard_placement_check":      k_shard_placement_check,
-    # --- CV-shape ---
-    "cross_cluster_cv_equality":  k_cross_cluster_cv_equality,
-    "cv_boundary_by_dbid":        k_cv_boundary_by_dbid,
-    "db_cv_health":               k_db_cv_health,
-    "db_cv_order_side_only":      k_db_cv_order_side_only,
-    "stored_item_cv_split":       k_stored_item_cv_split,
 }
 
-
-# ============================================================================
-# Ansible entry point
-# ============================================================================
 
 def main():
     module = AnsibleModule(argument_spec=dict(
@@ -2018,17 +738,10 @@ def main():
         nodes=dict(type="list", elements="str", default=None),
         cluster_leader=dict(default=None),
 
-        # id sets (used by doc_id_set_parity, revision_count_parity,
-        # capture_doc_cv, and any kind taking `doc_ids`/`id_prefixes`)
+        # id sets (used by doc_id_set_parity, revision_count_parity)
         ids=dict(type="list", elements="str", default=None),
         id_prefix=dict(default=None),
         count=dict(type="int", default=None),
-        doc_ids=dict(type="list", elements="str", default=None),
-        id_prefixes=dict(type="list", elements="str", default=None),
-        sample_per_prefix=dict(type="int", default=None),
-
-        # cross_cluster_cv_equality
-        anchor=dict(default=None),
 
         # schema_version
         require_parity=dict(type="bool", default=False),
@@ -2037,12 +750,6 @@ def main():
         # size_envelope
         baseline_file=dict(type="path", default=None),
         max_growth_pct=dict(type="float", default=None),
-
-        # capture_cv / capture_doc_cv
-        output_dir=dict(type="path", default=None),
-
-        # scan_fltr
-        capture_dir=dict(type="path", default=None),
 
         # revision_count_parity
         expected_count=dict(type="int", default=None),
@@ -2054,43 +761,9 @@ def main():
         # extension_stats_parity
         aspects=dict(default=None),
 
-        # stored_item_cv_split: "raw" / "split"
-        # revision_form_sampling: "any-raw" / "all-split" / "any-split" / "all-raw"
-        expect=dict(default=None,
-                    choices=["raw", "split",
-                             "any-raw", "all-split", "any-split", "all-raw",
-                             None]),
-        delimiter=dict(default=None),
-
-        # filter_compliance / cross_sink_isolation / hub_sink_doc_set
-        sink_cluster_leader=dict(default=None),
-        allowed_prefixes=dict(type="list", elements="str", default=None),
-        forbidden_prefixes=dict(type="list", elements="str", default=None),
-        # hub_sink_doc_set
-        hub_cluster_leader=dict(default=None),
-        sink_local_prefixes=dict(type="list", elements="str", default=None),
-        sample_cap=dict(type="int", default=None),
-
-        # cv_boundary_by_dbid
-        source_nodes=dict(type="list", elements="str", default=None),
-        receiver_nodes=dict(type="list", elements="str", default=None),
-        strict_v_new=dict(type="bool", default=False),
-
-        # db_cv_health
-        hub_nodes=dict(type="list", elements="str", default=None),
-        sink_nodes=dict(type="list", elements="str", default=None),
-        baseline_dir=dict(type="path", default=None),
-        postbatch_dir=dict(type="path", default=None),
-
-        # db_cv_order_side_only
-        receiver_group_nodes=dict(type="list", elements="str", default=None),
-        receiver_group_tags=dict(type="list", elements="str", default=None),
-
         # stats_parity
         assert_fields=dict(type="list", elements="str", default=None),
-        # stats_parity pre-settle: poll asserted fields until they agree across
-        # all has_db nodes before running the final assert.  Closes the gap
-        # between etag-stable and counter-caught-up.  0 = no pre-settle.
+        # stats_parity pre-settle (0 = disabled)
         settle_secs=dict(type="int", default=None),
         settle_interval=dict(type="int", default=None),
 

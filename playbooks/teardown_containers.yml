@@ -58,10 +58,6 @@
         state: absent
 
     - name: Kill any leftover W-1 background workloads + their pidfiles
-      # Background workloads are launched via nohup and survive a Ctrl-C of the scenario.
-      # Teardown is the "reset everything" command, so we sweep them here too.
-      # The [w]orkload regex trick prevents pkill from matching its own command line
-      # (which literally contains the pattern string) and SIGTERM'ing the shell running it.
       ansible.builtin.shell: |
         pkill -f '[w]orkload_w1.sh' 2>/dev/null || true
         rm -f /tmp/w1-*.pid 2>/dev/null || true
@@ -77,8 +73,6 @@
 
   tasks:
     - name: Remove the ANSIBLE MANAGED CHAOS LAB block from /etc/hosts
-      # Match the per-network marker scoped by form_clusters.yml so a parallel
-      # teardown only strips ITS scenario's host block, not the other scenarios'.
       ansible.builtin.blockinfile:
         path: /etc/hosts
         marker: "# {mark} ANSIBLE MANAGED CHAOS LAB ({{ docker_network_name | default('default') }})"

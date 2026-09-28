@@ -1,31 +1,17 @@
-##################################################################################################
 # playbooks/cleanup_ssh_targets.yml
 #
-# Cleans up SSH-mode targets (VMs / bare metal / other computers) -- removes everything the
-# chaos harness installed on them.  The hosts themselves stay reachable; we just undo our work.
+# Removes everything the chaos harness installed on SSH-mode targets (VMs / bare
+# metal / other computers). The hosts themselves stay reachable.
 #
-# This is NOT a "teardown" in the docker sense -- we don't destroy the machines (we didn't create
-# them, you did).  We just clean what the harness left behind.
+# What it does:
+#   1. Runs the ravendb_node role with state=absent on each host (stops the
+#      service, purges the package, removes data/config/logs, user and prereqs).
+#   2. Flushes chaos REJECT/DROP iptables rules.
+#   3. Strips the ANSIBLE MANAGED CHAOS LAB block from /etc/hosts on each host
+#      and the controller.
 #
-# What it does, in order:
-#   1. Runs the ravendb_node role with state=absent on each host.  The role handles:
-#        * stop + disable systemd service
-#        * remove /etc/systemd/system/ravendb.service
-#        * dpkg --purge ravendb
-#        * remove /usr/lib/ravendb, /var/lib/ravendb, /etc/ravendb, /var/log/ravendb
-#        * remove ravendb user + group
-#        * cleanup python prereqs + ldconfig
-#   2. Flushes chaos-specific iptables REJECT/DROP rules that the role wouldn't know about.
-#   3. Strips the ANSIBLE MANAGED CHAOS LAB block from /etc/hosts on each host AND the controller.
-#
-# Does NOT:
-#   * Flip cloud-init's manage_etc_hosts back on (form_clusters.yml flipped it off; we
-#     leave it that way).
-#   * Touch sshd, the OS, apt cache outside RavenDB, or anything else.
-#
-# RUN EXAMPLE:
+# Run:
 #   ansible-playbook -i inventory/ssh_hosts.yml playbooks/cleanup_ssh_targets.yml
-##################################################################################################
 
 - name: Sanity check
   hosts: localhost

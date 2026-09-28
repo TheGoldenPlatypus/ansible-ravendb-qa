@@ -1,16 +1,9 @@
-##################################################################################################
-# toolbox/diagnostic/diagnostic_replication.yml
+# toolbox/diagnostic/diagnostic_replication.yml -- print incoming and outgoing replication
+# connections for a database on one node.
 #
-# Dumps incoming + outgoing replication connections for a database on a target node.
-# Pure info, no assert.  Useful for diagnosing "who's talking to whom right now".
+# Inputs:  target, db_name (required).
 #
-# INPUTS:
-#   target   REQUIRED.
-#   db_name  REQUIRED.
-#
-# RUN EXAMPLE:
-#   ansible-playbook toolbox/diagnostic/diagnostic_replication.yml -e target=2a -e db_name=Tenants
-##################################################################################################
+# Example: ansible-playbook toolbox/diagnostic/diagnostic_replication.yml -e target=2a -e db_name=Tenants
 
 - name: Show active replication connections on a target node
   hosts: localhost

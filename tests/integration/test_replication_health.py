@@ -1,15 +1,4 @@
-"""
-Tests for k_replication_health.
-
-What the kind does:  fetches /databases/<db>/tasks, filters OngoingTasks to
-                     replication-flavored types (ExternalReplication,
-                     PullReplicationAsHub/Sink, RavenEtl), and under assert_mode
-                     raises if any task is Faulted, has an Error, or is in
-                     TaskConnectionStatus=Reconnect.
-Returns:             list[str] -- header + per-task line + PASS line.
-                     Raises RuntimeError on non-200 (db missing / node unreachable).
-                     Raises DiagnosticViolation under assert_mode on any stuck task.
-"""
+"""Tests for k_replication_health."""
 
 import time
 
@@ -28,8 +17,7 @@ from raven_lab import (
 
 
 def test_passes_when_replication_task_is_healthy(ravendb_cluster):
-    """External replication wired between two reachable nodes -> task reports
-    Active connection status -> health check returns PASS."""
+    """Healthy replication task between two reachable nodes -> PASS."""
     info = ravendb_cluster(n_nodes=2, cluster=False)
     n1, n2 = info["nodes"]
 
@@ -43,16 +31,12 @@ def test_passes_when_replication_task_is_healthy(ravendb_cluster):
     print_lines("actual", lines)
     print()
     assert f"replication health on {n1}/db1" in lines[0]
-    # RavenDB reports an external-replication task under TaskType="Replication"
-    # in the OngoingTasks list (the create endpoint uses external-replication
-    # in its URL, but the listed type is plain "Replication").
     assert "Replication" in text
     assert "PASS  no stuck replication task" in text
 
 
 def test_passes_when_no_replication_tasks_exist(ravendb_cluster):
-    """Fresh db with no tasks configured -> the kind reports 0 tasks and
-    PASSes.  No false positive on an empty task list."""
+    """Fresh db with no tasks -> reports 0 tasks and PASS."""
     info = ravendb_cluster(n_nodes=1)
     node = info["nodes"][0]
 
@@ -67,18 +51,14 @@ def test_passes_when_no_replication_tasks_exist(ravendb_cluster):
 
 
 def test_fails_loud_under_assert_mode_when_task_is_stuck(ravendb_cluster):
-    """Wire an ExternalReplication task to a port nothing listens on -- the
-    task lands in TaskConnectionStatus=Reconnect within a few seconds.  Under
-    assert_mode, the kind must raise DiagnosticViolation."""
+    """Stuck replication task under assert_mode -> raises DiagnosticViolation."""
     info = ravendb_cluster(n_nodes=1)
     node = info["nodes"][0]
 
     _wire_bogus_external_replication(src_node=node)
 
-    # Trigger the OUTGOING attempt so the task actually tries to connect.
     write_doc(node, "users/1", {"name": "trigger"})
 
-    # Wait for the task to enter a stuck state (Reconnect / error).
     last_lines = []
     deadline = time.monotonic() + 20
     while time.monotonic() < deadline:
@@ -98,7 +78,7 @@ def test_fails_loud_under_assert_mode_when_task_is_stuck(ravendb_cluster):
 
 
 def test_raises_when_db_does_not_exist(ravendb_cluster):
-    """Fail loud on missing DB instead of returning a soft string."""
+    """Missing db -> k_replication_health raises RuntimeError."""
     info = ravendb_cluster(n_nodes=1)
     node = info["nodes"][0]
 
@@ -110,9 +90,7 @@ def test_raises_when_db_does_not_exist(ravendb_cluster):
 
 
 def _wait_for_pass_or_fail(node, timeout=10):
-    """Poll k_replication_health(node) until the task list is non-empty.  The
-    task is registered async by RavenDB so a fresh setup can briefly report 0
-    tasks before settling."""
+    """Poll k_replication_health(node) until the task list is non-empty."""
     deadline = time.monotonic() + timeout
     lines = []
     while time.monotonic() < deadline:
@@ -124,10 +102,9 @@ def _wait_for_pass_or_fail(node, timeout=10):
 
 
 def _wire_bogus_external_replication(src_node, db="db1"):
-    """Create a connection string + external-replication task pointing at a
-    port that nothing listens on, so the task lands in Reconnect."""
+    """Wire an external-replication task at an unreachable port so it lands in Reconnect."""
     src_url = _url_for(src_node)
-    bogus_url = "http://127.0.0.1:1"   # port 1 -> connection refused
+    bogus_url = "http://127.0.0.1:1"
 
     cs_body = {
         "Type": "Raven",

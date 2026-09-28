@@ -1,26 +1,8 @@
-##################################################################################################
-# toolbox/network/cut_link_ssh.yml
+# toolbox/network/cut_link_ssh.yml -- SSH-mode variant: DROP all TCP between two hosts in both directions.
 #
-# SSH-mode variant of cut_link.yml.  DROPs all TCP traffic between two hosts in both directions.
+# Inputs:  node_a, node_b (required; both in inventory's ravendb_nodes group).
 #
-# Why DROP and not REJECT (the docker variant):
-#   REJECT --reject-with tcp-reset emits TCP RST packets.  In SSH-mode setups on WSL2/Hyper-V,
-#   those RSTs flow through Windows's network stack and wedge its stateful filter -- subsequent
-#   TCP attempts from the controller to the peers get silently dropped.  DROP is silent (no RST),
-#   so Windows doesn't wedge.  The tradeoff is existing TCP connections hang/timeout instead of
-#   dying immediately -- which is actually more realistic for "the peer disappeared" chaos.
-#
-# Verify the cut FROM INSIDE one of the cut peers (not from the controller!):
-#   ssh worker4@<1a> 'curl -k --max-time 3 https://1b.hubsink.test:443/build/version 2>&1'
-#   -> should time out / fail.  Verifying from the controller hits a different path entirely.
-#
-# INPUTS:
-#   node_a  REQUIRED.  First host (must be in inventory's ravendb_nodes group).
-#   node_b  REQUIRED.  Second host.
-#
-# RUN EXAMPLE:
-#   ansible-playbook -i inventory/ssh_hosts.yml toolbox/network/cut_link_ssh.yml -e node_a=1a -e node_b=1b
-##################################################################################################
+# Example: ansible-playbook -i inventory/ssh_hosts.yml toolbox/network/cut_link_ssh.yml -e node_a=1a -e node_b=1b
 
 - name: Cut the link between two SSH hosts
   hosts: localhost

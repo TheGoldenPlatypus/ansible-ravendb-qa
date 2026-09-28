@@ -1,24 +1,11 @@
-##################################################################################################
-# toolbox/diagnostic/diagnostic_replication_health.yml
+# toolbox/diagnostic/diagnostic_replication_health.yml -- assert no replication ongoing task on
+# target/db_name is faulted, errored, or reconnecting.
 #
-# Asserts no replication-flavored ongoing task on `target/db_name` is stuck.  Hits
-# /databases/<db>/tasks, filters OngoingTasks to ExternalReplication / PullReplicationAsHub /
-# PullReplicationAsSink / RavenEtl, and fails under assert_mode on any task that is
-# Faulted, has an Error, or has TaskConnectionStatus=Reconnect at the moment of the check.
-# Callers should drain first; a sustained "Reconnect" after a drain means the task isn't
-# progressing.  Serves I-6 (no stuck task) in the company-1 scenarios.
+# Inputs:  target (node to query), db_name (required); assert_mode (optional, default false;
+#          true fails the play on a stuck task).
 #
-# Distinct from `diagnostic_replication.yml` (pure info on active connections).
-#
-# INPUTS:
-#   target       REQUIRED.  Node to query (typically the cluster leader).
-#   db_name      REQUIRED.
-#   assert_mode  OPTIONAL.  Default false (info-only).  Set true to fail the play on a stuck task.
-#
-# RUN EXAMPLE:
-#   ansible-playbook toolbox/diagnostic/diagnostic_replication_health.yml \
-#       -e target=1a -e db_name=db1 -e assert_mode=true
-##################################################################################################
+# Example: ansible-playbook toolbox/diagnostic/diagnostic_replication_health.yml \
+#              -e target=1a -e db_name=db1 -e assert_mode=true
 
 - name: Assert no stuck replication-flavored ongoing task on a target node
   hosts: localhost

@@ -1,25 +1,8 @@
-##################################################################################################
-# toolbox/service/hard_kill_ravendb.yml
+# toolbox/service/hard_kill_ravendb.yml -- SIGKILL the Raven.Server process inside a container.
 #
-# SIGKILL the Raven.Server process inside a container.  Used by RP-2 phase (c) "hard-kill
-# leader" sub-phases -- the point of the test is that the in-flight replication batch is
-# severed without a graceful shutdown.  No -TERM, no flush, no goodbye.
+# Inputs:  target (required; container name).
 #
-# Differs from restart_ravendb.yml (which is `systemctl restart ravendb`, i.e. SIGTERM with a
-# clean drain) -- those are different chaos primitives.  Use this one when the test wants the
-# kill to land mid-write.
-#
-# After kill, the container's systemd unit auto-restarts the process (the package ships a
-# systemd unit with Restart=on-failure).  If your scenario needs to control the restart
-# timing, pair this with toolbox/wait/wait_for_member.yml afterwards.
-#
-#
-# INPUTS:
-#   target      REQUIRED.  Container name (e.g. 1a).
-#
-# RUN:
-#   ansible-playbook toolbox/service/hard_kill_ravendb.yml -K -e target=1a
-##################################################################################################
+# Example: ansible-playbook toolbox/service/hard_kill_ravendb.yml -K -e target=1a
 
 - name: SIGKILL Raven.Server inside container
   hosts: localhost

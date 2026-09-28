@@ -1,21 +1,9 @@
-##################################################################################################
-# toolbox/writes/write_docs_revisions.yml
+# toolbox/writes/write_docs_revisions.yml -- PUT count docs revs_per_doc times each, distinct body per PUT.
 #
-# PUTs `count` docs `revs_per_doc` times each, with a DISTINCT body on every PUT so RavenDB
-# actually records each one as a new revision.
+# Inputs:  target, db_name, count, revs_per_doc (required); id_prefix (default "seed"),
+#          collection (default "MicroDocs").
 #
-# INPUTS:
-#   target         REQUIRED.
-#   db_name        REQUIRED.  (revisions config must already be enabled)
-#   count          REQUIRED.  Number of distinct doc ids.
-#   revs_per_doc   REQUIRED.  Number of distinct revisions to PUT per doc.
-#   id_prefix      OPTIONAL.  Default "seed".
-#   collection     OPTIONAL.  Default "MicroDocs".
-#
-# RUN EXAMPLES:
-#   ansible-playbook toolbox/writes/write_docs_revisions.yml -e target=1a -e db_name=db1 -e count=10000 -e revs_per_doc=5
-#   ansible-playbook toolbox/writes/write_docs_revisions.yml -e target=1a -e db_name=db1 -e count=100 -e revs_per_doc=3 -e id_prefix=probe/r1
-##################################################################################################
+# Example: ansible-playbook toolbox/writes/write_docs_revisions.yml -e target=1a -e db_name=db1 -e count=10000 -e revs_per_doc=5
 
 - name: Write N docs x M distinct revisions each
   hosts: localhost

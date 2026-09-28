@@ -5,7 +5,7 @@ from collections import defaultdict
 
 
 def params(**kwargs):
-    """A params dict where unset keys return None (kinds use `p["x"] or default`)."""
+    """A params dict where unset keys return None."""
     p = defaultdict(lambda: None)
     p["db_name"] = "db1"
     p["ravendb_domain"] = "ignored-when-override-is-set"
@@ -16,13 +16,7 @@ def params(**kwargs):
 
 
 def print_lines(label, lines):
-    """Multi-line pretty-print for `actual:` blocks where the kind returns a
-    list[str].  Renders as:
-        <label>:
-            line 1
-            line 2
-            ...
-    Avoids the unreadable single-line repr of a 5-line list."""
+    """Pretty-print a list[str] under an indented label."""
     print(f"    {label}:")
     for line in lines:
         print(f"        {line}")
@@ -45,7 +39,7 @@ def _url_for(node_name):
 
 
 def write_doc(node_name, doc_id, body, db="db1", collection="Test"):
-    """PUT a document into <node>/<db>.  Returns the response @change-vector."""
+    """PUT a document into <node>/<db>. Returns the response @change-vector."""
     payload = dict(body)
     payload["@metadata"] = {"@collection": collection}
     status, resp = _http(
@@ -59,8 +53,7 @@ def write_doc(node_name, doc_id, body, db="db1", collection="Test"):
 
 
 def enable_revisions(node_name, db="db1"):
-    """Turn on revisions for the database.  By default RavenDB doesn't keep
-    revisions; without this, repeated PUTs to the same id don't accumulate."""
+    """Turn on revisions for the database."""
     body = {
         "Default": {
             "Disabled": False,
@@ -80,8 +73,7 @@ def enable_revisions(node_name, db="db1"):
 
 
 def add_attachment(node_name, doc_id, name, content, db="db1"):
-    """PUT an attachment of bytes `content` onto an existing doc.
-    `content` may be str (encoded utf-8) or bytes."""
+    """PUT an attachment onto an existing doc. `content` may be str or bytes."""
     if isinstance(content, str):
         content = content.encode("utf-8")
     url = f"{_url_for(node_name)}/databases/{db}/attachments?id={doc_id}&name={name}"
@@ -96,7 +88,7 @@ def add_attachment(node_name, doc_id, name, content, db="db1"):
 
 
 def delete_doc(node_name, doc_id, db="db1"):
-    """DELETE a document by id from a node.  Idempotent (no error if missing)."""
+    """DELETE a document by id from a node. Idempotent."""
     status, resp = _http(
         "DELETE",
         f"{_url_for(node_name)}/databases/{db}/docs?id={doc_id}",
@@ -107,19 +99,10 @@ def delete_doc(node_name, doc_id, db="db1"):
 
 def setup_external_replication(src_node, dst_node, db="db1", name="test-ext-repl",
                                 connection_string_name="test-conn"):
-    """Wire an external_replication task: src pushes its db -> dst's db.
-
-    Two API calls:
-      1. PUT a RavenConnectionString on src naming dst's URL + db.
-      2. POST an external_replication task on src that references it.
-
-    Returns the task id (TaskId from the response) so the test can later
-    delete the task.
-    """
+    """Wire an external_replication task from src to dst. Returns the task id."""
     src_url = _url_for(src_node)
     dst_url = _url_for(dst_node)
 
-    # 1. connection string -- one object at top level with Type=Raven.
     cs_body = {
         "Type": "Raven",
         "Name": connection_string_name,
@@ -131,7 +114,6 @@ def setup_external_replication(src_node, dst_node, db="db1", name="test-ext-repl
     if status not in (200, 201):
         raise RuntimeError(f"connection-string PUT failed: HTTP {status} {resp[:300]}")
 
-    # 2. external_replication task -- RavenDB wraps it in a "Watcher" field.
     task_body = {
         "Watcher": {
             "Name": name,
@@ -161,7 +143,7 @@ def delete_replication_task(src_node, task_id, db="db1", task_type="Replication"
 
 
 def get_doc_cv(node_name, doc_id, db="db1"):
-    """Read a doc and return its @change-vector (None if not found)."""
+    """Read a doc and return its @change-vector, or None if not found."""
     status, resp = _http(
         "GET",
         f"{_url_for(node_name)}/databases/{db}/docs?id={doc_id}",

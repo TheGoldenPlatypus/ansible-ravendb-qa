@@ -1,65 +1,34 @@
-##################################################################################################
 # playbooks/install_ravendb.yml
 #
-# Installs RavenDB on every docker container currently attached to the shared network.
-# Containers must already exist (run playbooks/provision_nodes.yml first).
+# Installs RavenDB on every node in the ravendb_nodes group. Containers must
+# already exist (run playbooks/provision_nodes.yml first).
 #
 # Works in both target_modes:
-#   * docker -- discovers containers from docker_network_name, adds them to ravendb_nodes.
-#   * ssh    -- expects ravendb_nodes already populated from an inventory file (e.g.
-#               inventory/ssh_hosts.yml).  Use playbooks/setup_ssh_targets.yml to bootstrap first.
+#   * docker -- discovers containers from docker_network_name.
+#   * ssh    -- expects ravendb_nodes populated from an inventory file.
 #
-# What it does, in order:
-#   1. (docker mode only) Discovers every container on docker_network_name and adds them
-#      to the ravendb_nodes group.  In ssh mode this step is a no-op.
-#   2. Trusts the self-signed CA on the controller (so curl-from-controller will work later).
-#   3. Runs the ravendb.ravendb.ravendb_node role on every container -- installs the deb,
-#      drops the server cert + license, configures secured self-signed TLS, sets the public
-#      server URL to https://<container>.<ravendb_domain>:443.
-#   4. ONLY on each cluster's leader (container name ending in 'a'): extracts the server cert
-#      as PEM/key, copies the admin client PFX in, and registers it against RavenDB as a
-#      ClusterAdmin certificate.  Followers are skipped intentionally -- registering on them
-#      would commit them to their own one-node cluster and block the later form_clusters merge.
+# What it does:
+#   1. (docker mode) Discovers containers and adds them to ravendb_nodes.
+#   2. Trusts the self-signed CA on the controller.
+#   3. Runs the ravendb_node role on every node: installs the deb, drops the
+#      server cert and license, configures secured self-signed TLS.
+#   4. On each cluster leader (name ending in 'a') only, registers the admin
+#      client certificate as ClusterAdmin.
 #
-# INPUTS (all overridable via `-e key=value`; defaults live in inventory/group_vars/all.yml):
-#   docker_network_name  shared docker network to discover containers from   (default: hubsinknet)
-#   rdb_version          RavenDB version to install                          (default: 7.2.2)
-#   ravendb_domain       domain stamped into each node's PublicServerUrl     (default: hubsink.test)
-#   cert_dir             folder containing the cert + license files          (default: /home/kaiju-1/company-1/selfsignedmaterials)
-#                        cert_ca_crt / cert_server_pfx / cert_client_pfx /
-#                        cert_license / cert_ca_key are derived from this.
-#   custom_build         OPTIONAL.  Path or URL to a custom RavenDB .deb.
-#                        When set, the file is pre-staged at /tmp/ravendb.deb
-#                        on every container and the role's download step is
-#                        bypassed (you must pass --skip-tags download yourself).
-#   ravendb_log_mode     Logs.Mode value rendered into each node's settings.json.
-#                        Default: Information (verbose; useful for chaos forensics).
-#                        Override to Operations / Reduced / None to dial back.
+# Inputs (override with -e key=value; defaults in inventory/group_vars/all.yml):
+#   docker_network_name  docker network to discover containers from
+#   rdb_version          RavenDB version to install
+#   ravendb_domain       domain stamped into each node's PublicServerUrl
+#   cert_dir             folder containing the cert + license files
+#   custom_build         OPTIONAL. Path or URL to a custom .deb (requires
+#                        --skip-tags download).
+#   ravendb_log_mode     Logs.Mode value (default: Information).
 #
-# RUN EXAMPLES:
-#   # use all defaults -- installs current rdb_version on every existing container
+# Run:
 #   ansible-playbook playbooks/install_ravendb.yml
-#
-#   # install a specific RavenDB version
 #   ansible-playbook playbooks/install_ravendb.yml -e rdb_version=6.2.15
-#
-#   # install a CUSTOM build from a URL (e.g. internal CI artifact)
 #   ansible-playbook playbooks/install_ravendb.yml \
-#       -e custom_build=https://internal.example.com/raven-feature-branch.deb \
-#       --skip-tags download
-#
-#   # install a CUSTOM build from a local .deb on the controller
-#   ansible-playbook playbooks/install_ravendb.yml \
-#       -e custom_build=/home/me/raven-feature-branch.deb \
-#       --skip-tags download
-#
-# NOTES:
-#   * Slowest playbook in the chain (~5-10 min) -- the deb install + cert setup runs per container.
-#   * Idempotent: re-running on already-installed containers is a no-op.
-#   * Custom-build mode requires passing `--skip-tags download`.  That tells the upstream
-#     role NOT to wipe and re-fetch /tmp/ravendb.deb, so our pre-staged file is what gets
-#     installed.  Without --skip-tags, the role overwrites our file with the official build.
-##################################################################################################
+#       -e custom_build=<url-or-path> --skip-tags download
 
 - name: Discover targets and populate ravendb_nodes
   hosts: localhost
@@ -67,7 +36,7 @@
   gather_facts: false
 
   tasks:
-    # ---------- docker mode: discover containers from the shared network -----------------------
+    # docker mode: discover containers from the shared network
     - name: (docker mode) Inspect the shared docker network
       community.docker.docker_network_info:
         name: "{{ docker_network_name }}"
@@ -84,7 +53,7 @@
       changed_when: false
       when: target_mode | default('docker') == 'docker'
 
-    # ---------- ssh mode: hosts already populated from inventory --------------------------------
+    # ssh mode: hosts already populated from inventory
     - name: (ssh mode) Confirm ravendb_nodes is non-empty (inventory must populate it)
       ansible.builtin.assert:
         that:
@@ -116,14 +85,8 @@
       when: ca_copy.changed
 
 
-# ------------------------------------------------------------------------------------------------
-# Optional: pre-stage a custom RavenDB build on every container.
-# Only runs when `custom_build` is provided.  Accepts:
-#   - a URL  (http:// or https://)  -> downloaded directly into the container
-#   - a local path on the controller -> copied into the container
-# The role's download step (tagged `download` in the role) must be skipped on the CLI:
-#     ansible-playbook playbooks/install_ravendb.yml -e custom_build=<url-or-path> --skip-tags download
-# ------------------------------------------------------------------------------------------------
+# Optional: pre-stage a custom RavenDB build on every node.
+# Only runs when custom_build is provided (requires --skip-tags download).
 
 - name: Pre-stage custom RavenDB build (only when custom_build is provided)
   hosts: ravendb_nodes
@@ -161,7 +124,6 @@
         ravendb_state: present
         ravendb_version: "{{ rdb_version }}"
         ravendb_release_channel: stable
-        # arm64 on aarch64 hosts, x64 elsewhere
         ravendb_arch: "{{ 'linux-arm64' if ansible_architecture in ['aarch64','arm64'] else 'linux-x64' }}"
         ravendb_settings_preset: default
         ravendb_secured_self_signed_enabled: true

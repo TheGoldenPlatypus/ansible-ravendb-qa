@@ -1,40 +1,12 @@
-##################################################################################################
-# toolbox/consistency_check/assert_alive.yml
+# toolbox/consistency_check/assert_alive.yml -- liveness check for ConsistencyCheck: PID alive passes; PID dead or health endpoint unreachable fails.
 #
-# Light-touch liveness check.  Called from scenarios at natural sync points (after each
-# upgrade sub-batch, after enable_features, etc.) to catch an early ConsistencyCheck
-# death without a continuous-poll background task.
-#
-# Liveness signal: **the PID being alive is what counts**.  The /health-check
-# endpoint is a soft status reporter -- it returns 503 when the tool has recent
-# backend failures (e.g. RavenDB on a node returned ServiceUnavailable because
-# the node was restarting mid-upgrade), even though the tool is alive and
-# retrying correctly.  Requiring 200 here false-fails the scenario whenever the
-# tool's retry loop overlaps an upgrade-induced node restart -- which is
-# exactly the chaos window the tool is meant to exercise.
-#
-# So:
-#   PID alive (kill -0)                   -> assert_alive PASSES
-#   PID dead                              -> assert_alive FAILS
-#   /health-check unreachable (no HTTP)   -> assert_alive FAILS  (embedded server died)
-#   /health-check returns ANY HTTP code   -> assert_alive PASSES, code logged
-#     (200 = healthy now; 503 = currently retrying; anything else = also still serving)
-#
-# On failure: dump the last 60 lines of the tool's log and fail loud.
-#
-# REQUIRED:
-#   net                docker_network_name of the iter (same value used at start).
-#
-# OPTIONAL:
-#   health_port        Default 8081.
-##################################################################################################
+# Inputs:  net (required, docker_network_name of the iter); health_port (default 8081).
 
 - name: ConsistencyCheck -- assert alive
   hosts: localhost
   connection: local
   gather_facts: false
   vars:
-    # leading underscore to avoid the `var: {{ var | default(...) }}` recursion footgun
     _health_port: "{{ health_port | default(8081) | int }}"
     _pidfile: "/tmp/ccheck-{{ net }}.pid"
     _logfile: "/tmp/ccheck-{{ net }}.log"

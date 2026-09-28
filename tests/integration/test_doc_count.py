@@ -1,10 +1,4 @@
-"""
-Tests for k_doc_count.
-
-What the kind does:  reports the document count for one node + db.
-Returns:             a one-line string  "<target>/<db>  ->  <N> docs"
-                     or                  "<target>/<db>  ->  (no /stats response)"
-"""
+"""Tests for k_doc_count."""
 
 import pytest
 
@@ -39,7 +33,7 @@ def test_doc_count_reports_n_after_n_writes(ravendb_cluster):
 
 
 def test_doc_count_reflects_deletes(ravendb_cluster):
-    """Live state, not cached: writes 5, deletes 2, expects 3."""
+    """Write 5, delete 2 -> count reports 3."""
     info = ravendb_cluster(n_nodes=1)
     node = info["nodes"][0]
 
@@ -56,9 +50,7 @@ def test_doc_count_reflects_deletes(ravendb_cluster):
 
 
 def test_doc_count_raises_when_db_does_not_exist(ravendb_cluster):
-    """If /stats can't be fetched (db missing or node unreachable), the kind
-    should fail loud with RuntimeError -- not silently return a fallback
-    string that scenarios might miss."""
+    """Missing db -> k_doc_count raises RuntimeError."""
     info = ravendb_cluster(n_nodes=1)
     node = info["nodes"][0]
 

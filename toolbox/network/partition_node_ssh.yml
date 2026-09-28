@@ -1,17 +1,8 @@
-##################################################################################################
-# toolbox/network/partition_node_ssh.yml
+# toolbox/network/partition_node_ssh.yml -- SSH-mode variant: isolate one host from all its cluster peers via DROP.
 #
-# SSH-mode variant of partition_node.yml.  Isolates one host from every other node in its
-# cluster by cutting all links to its peers in one go.  Peers are discovered from the target's
-# /cluster/topology.  Uses DROP (silent), not REJECT -- see cut_link_ssh.yml header for the
-# reason.
+# Inputs:  target (required; host to partition, in inventory's ravendb_nodes group).
 #
-# INPUTS:
-#   target  REQUIRED.  Host to partition (must be in inventory's ravendb_nodes group).
-#
-# RUN EXAMPLE:
-#   ansible-playbook -i inventory/ssh_hosts.yml toolbox/network/partition_node_ssh.yml -e target=1c
-##################################################################################################
+# Example: ansible-playbook -i inventory/ssh_hosts.yml toolbox/network/partition_node_ssh.yml -e target=1c
 
 - name: Partition an SSH host from the rest of its cluster
   hosts: localhost

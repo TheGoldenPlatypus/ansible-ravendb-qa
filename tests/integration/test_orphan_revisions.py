@@ -1,16 +1,4 @@
-"""
-Tests for k_orphan_revisions.
-
-What the kind does:  POSTs /admin/revisions/orphaned/adopt on every node, polls
-                     /operations/state until terminal, FAILs if any node reports
-                     a non-zero AdoptedCount.  Marks INCONCLUSIVE when RavenDB
-                     op-id recycling returns a non-adopt $type.
-Returns:             list[str]
-Raises:              RuntimeError if any node is unreachable, if trigger returns
-                     non-2xx, or if operations don't finish within budget_secs.
-                     DiagnosticViolation in assert_mode when orphans were
-                     present.
-"""
+"""Tests for k_orphan_revisions."""
 
 import json
 
@@ -21,7 +9,7 @@ from raven_lab import params, print_lines
 
 
 def test_no_orphans_passes(ravendb_cluster):
-    """Empty DB -> no orphans -> PASS, AdoptedCount=0 everywhere."""
+    """Empty db -> no orphans -> PASS."""
     info = ravendb_cluster(n_nodes=1)
     node = info["nodes"][0]
 
@@ -35,8 +23,7 @@ def test_no_orphans_passes(ravendb_cluster):
 
 
 def _fake_request_adopted_count(adopted_count):
-    """Adopt POST returns op-id 1; /operations/state returns Completed with
-    AdoptOrphanedRevisionsResult.AdoptedCount = <adopted_count>."""
+    """Fake request: adopt returns Completed with the given AdoptedCount."""
     def fake_request(method, target, domain, path, client_cert, ca_cert,
                      body=None, content_type=None, timeout=30):
         if "/admin/revisions/orphaned/adopt" in path:
@@ -54,21 +41,19 @@ def _fake_request_adopted_count(adopted_count):
 
 
 def test_orphans_present_fails(ravendb_cluster, monkeypatch):
-    """Engineering real orphan revisions is heavy (delete+revisions keeps a
-    delete-marker, not orphans).  Monkeypatch /operations/state to report
-    AdoptedCount=5 -> info-mode FAIL line."""
+    """AdoptedCount > 0 -> info-mode FAIL line."""
     info = ravendb_cluster(n_nodes=1)
     node = info["nodes"][0]
     monkeypatch.setattr(diag, "request", _fake_request_adopted_count(5))
 
-    lines = diag.k_orphan_revisions(params(nodes=[node]))   # info mode
+    lines = diag.k_orphan_revisions(params(nodes=[node]))
     text = "\n".join(lines)
 
     print(f"\n    expected: 'FAIL  orphans were present on at least one node'")
     print_lines("actual", lines)
     print()
     assert "FAIL  orphans were present on at least one node" in text
-    assert "5" in text   # adopted count surfaced in per-node table
+    assert "5" in text
 
 
 def test_assert_mode_raises_on_orphans(ravendb_cluster, monkeypatch):
@@ -84,7 +69,7 @@ def test_assert_mode_raises_on_orphans(ravendb_cluster, monkeypatch):
 
 
 def test_unreachable_node_raises_loud(ravendb_cluster):
-    info = ravendb_cluster(n_nodes=1)   # real server so the fixture cleans up
+    info = ravendb_cluster(n_nodes=1)
 
     import ravendb_client
     ravendb_client.TARGET_URL_OVERRIDES.clear()
@@ -98,10 +83,7 @@ def test_unreachable_node_raises_loud(ravendb_cluster):
 
 
 def test_inconclusive_path_via_op_id_recycling(ravendb_cluster, monkeypatch):
-    """RavenDB recycles op-ids on fast operations.  If /operations/state
-    returns a Completed result whose $type isn't AdoptOrphanedRevisionsResult,
-    the kind marks the node INCONCLUSIVE and falls back to 'OK (partial)'
-    instead of FAIL."""
+    """Completed result with a non-adopt $type -> INCONCLUSIVE, OK (partial), no FAIL."""
     info = ravendb_cluster(n_nodes=1)
     node = info["nodes"][0]
 
@@ -129,7 +111,7 @@ def test_inconclusive_path_via_op_id_recycling(ravendb_cluster, monkeypatch):
 
 
 def test_budget_exhausted_raises(ravendb_cluster, monkeypatch):
-    """Operation never reaches a terminal Status -> RuntimeError after budget."""
+    """Operation never terminates -> RuntimeError after budget."""
     info = ravendb_cluster(n_nodes=1)
     node = info["nodes"][0]
 

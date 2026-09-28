@@ -1,15 +1,7 @@
-##################################################################################################
-# toolbox/_internal/ensure_ravendb_venv.yml
+# toolbox/_internal/ensure_ravendb_venv.yml -- ensure the ravendb python client venv exists at ~/.ravendb_ansible.
 #
-# Ensure the ravendb python client is installed in ~/.ravendb_ansible.  Imported via
-# `import_playbook` from the four toolbox tools that use official ravendb.ravendb modules
-# requiring this venv (db/create_database, wait/wait_for_healthy, replication/define_hub,
-# replication/attach_sinks).
-#
-# Probes first.  Only runs the (slow) install role if the venv is missing or `-e force_prereqs=true`
-# was passed.  Sets `ansible_python_interpreter` for localhost so subsequent plays in the same
-# run use the venv-bundled python.
-##################################################################################################
+# Imported by toolbox tools that use official ravendb.ravendb modules. Probes first; installs
+# only if the venv is missing or -e force_prereqs=true.
 
 - name: Ensure ravendb python client is available on the controller
   hosts: localhost

@@ -3,24 +3,18 @@
 """
 ravendb_features -- enable / disable cluster-wide feature flags on a database.
 
-Used after a rolling upgrade lands the new binary on every node: some v_new
-behaviors are gated behind feature flags so they don't auto-activate on a
-mixed-binary cluster.  Once the whole topology is on the new build, the
-scenario flips the flag on with this module.
-
-The kind POSTs to /databases/<db>/admin/features then re-fetches the
-DatabaseRecord and asserts every Add feature is present and every Remove
-feature is gone before returning.  No silent success: a mis-applied flag
-fails the playbook here, not at the next surprised assertion downstream.
+POSTs Add/Remove to /databases/<db>/admin/features, then re-fetches the
+DatabaseRecord and verifies every change applied.
 """
 
 import json
 
 from ansible.module_utils.basic import AnsibleModule
-from ansible.module_utils.ravendb_client import request, resolve_db_admin_route
+from ansible.module_utils.ravendb_client import request
 
 
 def _post_features(p, target, add, remove):
+    """POST the Add/Remove feature lists to /admin/features on `target`."""
     path = "/databases/%s/admin/features" % p["db_name"]
     body = {"Add": list(add), "Remove": list(remove)}
     status, response = request(
@@ -34,6 +28,7 @@ def _post_features(p, target, add, remove):
 
 
 def _fetch_database_record(p, target):
+    """Return the parsed DatabaseRecord for the database from `target`."""
     path = "/admin/databases?name=%s" % p["db_name"]
     status, response = request(
         "GET", target, p["ravendb_domain"], path,
@@ -47,10 +42,7 @@ def _fetch_database_record(p, target):
 
 
 def _enabled_features_from_record(record):
-    """RavenDB has stored feature flags under a few different field names in
-    different releases.  SupportedFeatures is the v_new (7.x) field; the
-    other names cover older shapes.  Pick up whichever is present; treat a
-    list of strings as the canonical representation, normalize to a set."""
+    """Return the set of enabled feature names from the record."""
     for key in ("SupportedFeatures", "DatabaseFeatures", "EnabledFeatures", "Features"):
         v = record.get(key)
         if isinstance(v, list):
@@ -61,11 +53,7 @@ def _enabled_features_from_record(record):
 
 
 def _flatten_strings(obj):
-    """Walk a JSON-decoded object and yield every string -- both dict keys
-    and values.  Used as a fallback when the feature flag isn't where we
-    expected.  Feature names in RavenDB records can appear as keys (e.g.
-    Settings["Raven.Replication.X"] = "true") OR values (a list under
-    DatabaseFeatures); we want either to count."""
+    """Yield every string (dict keys and values) in a JSON-decoded object."""
     if isinstance(obj, str):
         yield obj
     elif isinstance(obj, dict):
@@ -86,20 +74,12 @@ def k_enable(p):
     if not add and not remove:
         raise ValueError("kind=enable requires non-empty `add` and/or `remove`")
 
-    target = resolve_db_admin_route(
-        p["target"], p["db_name"], p["ravendb_domain"],
-        p["client_cert"], p["ca_cert"],
-    )
+    target = p["target"]
 
     _post_features(p, target, add, remove)
 
     record = _fetch_database_record(p, target)
     enabled = _enabled_features_from_record(record)
-    # Fallback: scan every string in the record for the feature name.  Treat
-    # a feature as "present" if either the canonical list contains it OR the
-    # name appears as a substring of any key/value (covers schema renames
-    # like Settings["Raven.Replication.PullReplicationCompositeChangeVectors"]
-    # where the flag name is embedded in a longer key).
     record_strings = list(_flatten_strings(record))
 
     missing_after_add = []
@@ -111,11 +91,7 @@ def k_enable(p):
 
     still_present_after_remove = []
     for feat in remove:
-        in_canonical = enabled is not None and feat in enabled
-        # Don't use the loose substring scan for remove -- it's expected to
-        # appear in commit/audit fields after the removal, which would
-        # produce a false positive.
-        if in_canonical:
+        if enabled is not None and feat in enabled:
             still_present_after_remove.append(feat)
 
     lines = [

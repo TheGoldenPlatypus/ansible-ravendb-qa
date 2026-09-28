@@ -1,23 +1,19 @@
-# ============================================================================================
 # inventory/ssh_hosts.yml.example
 #
-# Template inventory for SSH-mode targets.  "SSH targets" means any machine the controller
-# can reach over SSH and run apt + systemctl on -- lab VMs, bare-metal servers, cloud
-# instances, other computers on your LAN, etc.  Copy to inventory/ssh_hosts.yml, fill in
-# the addresses + credentials for your fleet, then run any playbook with
-# -i inventory/ssh_hosts.yml.
+# Template inventory for SSH-mode targets (VMs, bare metal, cloud instances, other
+# machines reachable over SSH). Copy to inventory/ssh_hosts.yml, fill in your hosts,
+# then run any playbook with -i inventory/ssh_hosts.yml.
 #
-# Conventions (same as docker mode):
+# Conventions:
 #   * Host name = <cluster_id><node_letter>, e.g. 1a / 1b / 1c, 2a / 2b / 2c.
 #   * The node ending in 'a' is the cluster leader.
 #   * Cluster tag (A/B/C/...) is derived from the last letter, uppercased.
 #
 # Requirements per host:
-#   * SSH reachable from the controller as `ansible_user`.
-#   * Passwordless sudo, OR set ansible_become_password (see below).
-#   * Ubuntu / Debian-family (the ravendb_node role uses apt).
-#   * Architecture: amd64 or arm64 -- the role picks the matching deb.
-# ============================================================================================
+#   * SSH reachable from the controller as ansible_user.
+#   * Passwordless sudo, or set ansible_become_password.
+#   * Ubuntu / Debian-family (the role uses apt).
+#   * Architecture: amd64 or arm64.
 
 all:
   vars:

@@ -1,17 +1,8 @@
-##################################################################################################
-# toolbox/network/restore_link.yml
+# toolbox/network/restore_link.yml -- remove the REJECT rules installed by cut_link.yml between two containers.
 #
-# Removes the REJECT rules previously installed by cut_link.yml between two containers.
-# Symmetric inverse of cut_link.yml.  Safe to run even if the link was never cut --
-# iptables -D on a missing rule will just return non-zero (we tolerate it).
+# Inputs:  node_a, node_b (required).
 #
-# INPUTS:
-#   node_a  REQUIRED.  First container.
-#   node_b  REQUIRED.  Second container.
-#
-# RUN EXAMPLE:
-#   ansible-playbook toolbox/network/restore_link.yml -e node_a=1a -e node_b=1b
-##################################################################################################
+# Example: ansible-playbook toolbox/network/restore_link.yml -e node_a=1a -e node_b=1b
 
 - name: Restore the link between two containers
   hosts: localhost

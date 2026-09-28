@@ -1,17 +1,4 @@
-"""
-Tests for k_revision_count_parity.
-
-What the kind does:  for each probe doc id, GETs /revisions?id=<id> on every
-                     node and compares the result counts.  Two checks in
-                     sequence:
-                       1. counts must agree ACROSS nodes (no drift)
-                       2. if `expected_count` is set, every count must EQUAL it
-Returns:             list[str]
-Raises:              ValueError if neither `ids` nor (`id_prefix` + `count`).
-                     DiagnosticViolation in assert_mode on drift OR
-                     unexpected-count failure.
-                     RuntimeError if any node is unreachable.
-"""
+"""Tests for k_revision_count_parity."""
 
 import pytest
 
@@ -46,17 +33,17 @@ def test_passes_when_two_nodes_have_the_same_per_id_counts(ravendb_cluster):
 
 
 def test_fails_when_counts_diverge(ravendb_cluster):
-    """n1 has 3 revs, n2 has 1 rev -> drift -> FAIL line."""
+    """Per-id revision counts differ across nodes -> FAIL line."""
     info = ravendb_cluster(n_nodes=2, cluster=False)
     n1, n2 = info["nodes"]
 
     enable_revisions(n1)
     enable_revisions(n2)
     _three_revs(n1, "users/0")
-    write_doc(n2, "users/0", {"v": 1})           # only 1 rev
+    write_doc(n2, "users/0", {"v": 1})
 
     lines = diag.k_revision_count_parity(
-        params(nodes=[n1, n2], ids=["users/0"]))   # info mode
+        params(nodes=[n1, n2], ids=["users/0"]))
     text = "\n".join(lines)
 
     print(f"\n    expected: 'FAIL  revision count drift on:' line mentioning users/0")
@@ -84,8 +71,7 @@ def test_assert_mode_raises_on_drift(ravendb_cluster):
 
 
 def test_expected_count_mismatch_fails(ravendb_cluster):
-    """Both nodes have 3 revs (no drift across nodes), but caller asked for
-    5 -> triggers the SECOND check: 'expected N revs/id but mismatched on'."""
+    """Counts agree across nodes but differ from expected_count -> FAIL line."""
     info = ravendb_cluster(n_nodes=2, cluster=False)
     n1, n2 = info["nodes"]
 
@@ -106,7 +92,7 @@ def test_expected_count_mismatch_fails(ravendb_cluster):
 
 
 def test_unreachable_node_raises_loud(ravendb_cluster):
-    info = ravendb_cluster(n_nodes=1)   # real server so the fixture cleans up
+    info = ravendb_cluster(n_nodes=1)
 
     import ravendb_client
     ravendb_client.TARGET_URL_OVERRIDES.clear()
